@@ -32,16 +32,19 @@ extension CoreWebEndpoint {
                         // Dropdown for entries with children
                         let dropdownId = "navbarDropdown_\(entry.title.insertDashes())"
                         NavDropdown(title: entry.title,
-                                    id: dropdownId) {
+                                    id: dropdownId,
+                                    active: entry.selected) {
                             for child in entry.children {
                                 if child.children.isEmpty {
                                     NavDropdownItem(title: child.title,
-                                                    href: child.path ?? "#")
+                                                    href: child.path ?? "#",
+                                                    active: child.selected)
                                 } else {
                                     NavDropdownHeader(child.title)
                                     for grandChild in child.children {
                                         NavDropdownItem(title: grandChild.title,
-                                                        href: grandChild.path ?? "#")
+                                                        href: grandChild.path ?? "#",
+                                                        active: grandChild.selected)
                                     }
                                 }
                             }

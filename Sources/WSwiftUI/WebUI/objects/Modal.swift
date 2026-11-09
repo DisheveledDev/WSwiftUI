@@ -144,115 +144,94 @@ public extension CoreWebEndpoint {
             el.addAttribute(.pair("aria-hidden", "true"))
             if staticBackdrop { el.staticBackdrop() }
         }
-        stack.append(modal)
-        content()
-        stack.removeAll(where: { $0.builderId == modal.builderId })
-        return modal
+        return withParent(modal, content)
     }
+
+    // The parts below must sit inside the part named in their message. Wrapper elements in between (a
+    // Form, a VStack, ...) are allowed. Anywhere else the mistake is logged, an HTML comment marks the spot
+    // and the part is rendered where it was declared.
 
     /// Modal dialog wrapper
     @discardableResult
     func ModalDialog(_ content: WebComposerClosure) -> WebModalDialogElement {
-        guard let _ = stack.last as? WebModalElement else {
-            fatalError("ModalDialog must be inside Modal { ... }")
-        }
+        requireStructuralParent({ $0 is WebModalElement }, among: isModalPart,
+                                "ModalDialog must be inside Modal { ... }")
         let dialog = createModalDialog { el in
             el.elementName = "div"
             el.class("modal-dialog")
         }
-        stack.append(dialog)
-        content()
-        stack.removeAll(where: { $0.builderId == dialog.builderId })
-        return dialog
+        return withParent(dialog, content)
     }
 
     /// Modal content wrapper
     @discardableResult
     func ModalContent(_ content: WebComposerClosure) -> WebModalContentElement {
-        guard let _ = stack.last as? WebModalDialogElement else {
-            fatalError("ModalContent must be inside ModalDialog { ... }")
-        }
+        requireStructuralParent({ $0 is WebModalDialogElement }, among: isModalPart,
+                                "ModalContent must be inside ModalDialog { ... }")
         let contentEl = createModalContent { el in
             el.elementName = "div"
             el.class("modal-content")
         }
-        stack.append(contentEl)
-        content()
-        stack.removeAll(where: { $0.builderId == contentEl.builderId })
-        return contentEl
+        return withParent(contentEl, content)
     }
 
     /// Modal header with optional close button
     @discardableResult
     func ModalHeader(closeButton: Bool = true, _ content: WebComposerClosure) -> WebModalHeaderElement {
-        guard let _ = stack.last as? WebModalContentElement else {
-            fatalError("ModalHeader must be inside ModalContent { ... }")
-        }
+        requireStructuralParent({ $0 is WebModalContentElement }, among: isModalPart,
+                                "ModalHeader must be inside ModalContent { ... }")
         let header = createModalHeader { el in
             el.elementName = "div"
             el.class("modal-header")
         }
-        stack.append(header)
-        content()
-        if closeButton {
-            _ = createModalCloseButton { btn in
-                btn.elementName = "button"
-                btn.type("button")
-                btn.class("btn-close")
-                btn.addAttribute(.custom("data-bs-dismiss=\"modal\""))
-                btn.addAttribute(.custom("aria-label=\"Close\""))
+        return withParent(header) {
+            content()
+            if closeButton {
+                _ = createModalCloseButton { btn in
+                    btn.elementName = "button"
+                    btn.type("button")
+                    btn.class("btn-close")
+                    btn.addAttribute(.custom("data-bs-dismiss=\"modal\""))
+                    btn.addAttribute(.custom("aria-label=\"Close\""))
+                }
             }
         }
-        stack.removeAll(where: { $0.builderId == header.builderId })
-        return header
     }
 
     /// Modal title (<h5 class="modal-title">)
     @discardableResult
     func ModalTitle(_ content: WebComposerClosure) -> WebModalTitleElement {
-        guard let _ = stack.last as? WebModalHeaderElement else {
-            fatalError("ModalTitle must be inside ModalHeader { ... }")
-        }
+        requireStructuralParent({ $0 is WebModalHeaderElement }, among: isModalPart,
+                                "ModalTitle must be inside ModalHeader { ... }")
         let title = createModalTitle { el in
             el.elementName = "h5"
             el.class("modal-title")
         }
-        stack.append(title)
-        content()
-        stack.removeAll(where: { $0.builderId == title.builderId })
-        return title
+        return withParent(title, content)
     }
 
     /// Modal body
     @discardableResult
     func ModalBody(_ content: WebComposerClosure) -> WebModalBodyElement {
-        guard let _ = stack.last as? WebModalContentElement else {
-            fatalError("ModalBody must be inside ModalContent { ... }")
-        }
+        requireStructuralParent({ $0 is WebModalContentElement }, among: isModalPart,
+                                "ModalBody must be inside ModalContent { ... }")
         let body = createModalBody { el in
             el.elementName = "div"
             el.class("modal-body")
         }
-        stack.append(body)
-        content()
-        stack.removeAll(where: { $0.builderId == body.builderId })
-        return body
+        return withParent(body, content)
     }
 
     /// Modal footer
     @discardableResult
     func ModalFooter(_ content: WebComposerClosure) -> WebModalFooterElement {
-        guard let _ = stack.last as? WebModalContentElement else {
-            fatalError("ModalFooter must be inside ModalContent { ... }")
-        }
+        requireStructuralParent({ $0 is WebModalContentElement }, among: isModalPart,
+                                "ModalFooter must be inside ModalContent { ... }")
         let footer = createModalFooter { el in
             el.elementName = "div"
             el.class("modal-footer")
         }
-        stack.append(footer)
-        content()
-        stack.removeAll(where: { $0.builderId == footer.builderId })
-        return footer
+        return withParent(footer, content)
     }
     
     /// SwiftUI-like state-driven modal presentation.
@@ -313,4 +292,15 @@ public extension CoreWebEndpoint {
         let sheetId = id ?? "sheet_\(isPresented.builderId)"
         return Modal(id: sheetId, isPresented: isPresented, fade: fade, staticBackdrop: staticBackdrop, content)
     }
+}
+
+/// The elements that make up a modal's structure. Anything else on the builder stack is a wrapper.
+fileprivate func isModalPart(_ element: WebElement) -> Bool {
+    return element is WebModalElement
+        || element is WebModalDialogElement
+        || element is WebModalContentElement
+        || element is WebModalHeaderElement
+        || element is WebModalTitleElement
+        || element is WebModalBodyElement
+        || element is WebModalFooterElement
 }

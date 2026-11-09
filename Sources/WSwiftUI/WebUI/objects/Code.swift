@@ -38,19 +38,14 @@ public extension CoreWebEndpoint {
     // MARK: – Plain text
     @discardableResult
     func Code(language: CodeLanguage, _ text: String) -> WebElement {
-        var result: WebElement?
-
-        WrapInLayoutContainer {
-            result = create { element in
+        return withLayoutContainer {
+            create { element in
                 element.elementName  = "pre"
                 element.class("wsui-code")
                 // the code is shown literally: escape it exactly once
                 element.innerHTML("<code class = \"language-\(language.rawValue)\">\(text.escapedForCode())</code>")
             }
-        }
-        
-        return result!
-        
+        }.built
     }
     
 }

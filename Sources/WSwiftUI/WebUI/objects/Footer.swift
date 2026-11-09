@@ -64,9 +64,6 @@ public extension CoreWebEndpoint {
         footer.addAttribute(.class("wsui-footer"))
         // Default spacing and background (if needed)
         footer.addAttribute(.class("py-3"))
-        stack.append(footer)
-        content()
-        stack.removeAll(where: { $0.builderId == footer.builderId })
-        return footer
+        return withParent(footer, content)
     }
 }

@@ -252,7 +252,41 @@ public enum WebAction {
 /// `.setVariableFromExpression(expression:)` and `.animate(keyframes:options:)`.
 /// `.html`, `.appendHTML` and `.prependHTML` insert their (safely encoded) string as HTML, which is
 /// what they are for; use `.text` for plain text.
+///
+/// The verbatim JavaScript is preceded by the comment `/*<wsui:raw>*/`: the page renderer then gives the script
+/// carrying it a `<script>` element of its own (and drops the comment), so a syntax error in it can't stop
+/// the rest of the page's scripts. Variables an action declares are named after `builderId` and a counter,
+/// so the same actions always compile to the same code.
 public func CompileActions(_ actions: [WebAction], builderId: String) -> String {
+    var ids = ActionIdSequence(builderId: builderId)
+    return compileActionList(actions, builderId: builderId, ids: &ids)
+}
+
+/// Names for the variables an action declares (`postData<id>`, `xhr<id>`, `randomIndex<id>`, ...): the
+/// element's id and a counter that runs through one compile, nested actions included. The same actions on
+/// the same element therefore always compile to the same code (the names used to be random), and two
+/// actions in one compiled script never share a name.
+private struct ActionIdSequence {
+    let stem: String
+    var counter = 0
+
+    init(builderId: String) {
+        // generated ids are identifier-safe already; anything else an app assigned is made so
+        let safe = builderId.unicodeScalars.map { scalar -> String in
+            let v = scalar.value
+            let ok = (v >= 0x30 && v <= 0x39) || (v >= 0x41 && v <= 0x5A) || (v >= 0x61 && v <= 0x7A) || v == 0x5F || v == 0x24
+            return ok ? String(scalar) : "_"
+        }.joined()
+        stem = safe.isEmpty ? "action" : safe
+    }
+
+    mutating func next() -> String {
+        counter += 1
+        return "\(stem)_\(counter)"
+    }
+}
+
+private func compileActionList(_ actions: [WebAction], builderId: String, ids: inout ActionIdSequence) -> String {
     var script = ""
 
     // script-safe string literal
@@ -261,6 +295,38 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
     func byId(_ id: String) -> String { ScriptValue.elementById(id) }
     // the referenced element, or this element's registered global
     func target(_ ref: String?) -> String { ScriptValue.element(ref, fallback: builderId) }
+    // Bootstrap 5.3 sizes a spinner with `spinner-<type>-sm` (small) or, having no large class, with an inline
+    // 3rem width and height (as `Spinner.size(.large)` renders); medium is the default size.
+    // An action on an array variable: `next` starts as a copy of the variable's current array (a WArray holds
+    // a JS array; a JSON string is parsed; empty means []). `mutation` changes it, or `return`s to leave the
+    // variable alone, and the result goes through the variable's updater so bound controls follow: as an
+    // array for a WArray, as JSON text for any other variable (a WString would otherwise store 'a,b,c').
+    func arrayActionScript(_ variable: WebVariableElement, source: String, mutation: String) -> String {
+        let id = variable.builderId
+        let written = variable.variableType == .array ? "next" : "JSON.stringify(next)"
+        return """
+            (function () {
+                var current = \(id);
+                if (current === null || current === undefined || current === '') {
+                    current = [];
+                } else if (typeof current === 'string') {
+                    try { current = JSON.parse(current); } catch (e) { return; }
+                }
+                if (!Array.isArray(current)) { return; }
+                var next = current.slice();
+            \(mutation)
+                updateWebVariable\(id)(\(written), { source: '\(source)', origin: '\(builderId)' });
+            })();
+
+            """
+    }
+    func spinnerSizeScript(type: SpinnerType, size: SpinnerSize) -> String {
+        switch size {
+        case .small: return "spinnerElement.classList.add(\(str(type.rawValue + "-sm")));"
+        case .medium: return ""
+        case .large: return "spinnerElement.style.width = '3rem'; spinnerElement.style.height = '3rem';"
+        }
+    }
     
     for action in actions {
         switch action {
@@ -530,63 +596,42 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
                         """
                 }
             case .addToArray(let variable, let value):
-                script += """
-                    // turn the variable from a JSON string into an temporary var array again
-                    if (typeof \(variable.builderId) === 'string') {
-                        var tempArray\(variable.builderId) = JSON.parse(\(variable.builderId));
-                        if (Array.isArray(tempArray\(variable.builderId))) {
-                            tempArray\(variable.builderId).push(\(str(value)));
-                            updateWebVariable\(variable.builderId)(tempArray\(variable.builderId), { source: 'action.addToArray', origin: '\(builderId)' });
-                        }
-                    }
-                    """
-                
+                script += arrayActionScript(variable, source: "action.addToArray", mutation: """
+                        next.push(\(str(value)));
+                    """)
+
             case .removeFromArray(let variable, let value):
-                script += """
-                    // turn the variable from a JSON string into an temporary var array again
-                    if (typeof \(variable.builderId) === 'string') {
-                        var tempArray\(variable.builderId) = JSON.parse(\(variable.builderId));
-                        if (Array.isArray(tempArray\(variable.builderId))) {
-                            var index = tempArray\(variable.builderId).indexOf(\(str(value)));
-                            if (index !== -1) {
-                                tempArray\(variable.builderId).splice(index, 1);
-                                updateWebVariable\(variable.builderId)(tempArray\(variable.builderId), { source: 'action.removeFromArray', origin: '\(builderId)' });
-                            }
-                        }
-                    }
-                    """
+                script += arrayActionScript(variable, source: "action.removeFromArray", mutation: """
+                        var index = next.indexOf(\(str(value)));
+                        if (index === -1) { return; }
+                        next.splice(index, 1);
+                    """)
+
             case .toggleArray(let variable, let value):
-                
                 // if a value is there remove it, if it is not there add it
-                script += """
-                    // turn the variable from a JSON string into an temporary var array again
-                    if (typeof \(variable.builderId) === 'string') {
-                        var tempArray\(variable.builderId) = JSON.parse(\(variable.builderId));
-                        if (Array.isArray(tempArray\(variable.builderId))) {
-                            var index = tempArray\(variable.builderId).indexOf(\(str(value)));
-                            if (index !== -1) {
-                                tempArray\(variable.builderId).splice(index, 1);
-                            } else {
-                                tempArray\(variable.builderId).push(\(str(value)));
-                            }
-                            updateWebVariable\(variable.builderId)(tempArray\(variable.builderId), { source: 'action.toggleArray', origin: '\(builderId)' });
+                script += arrayActionScript(variable, source: "action.toggleArray", mutation: """
+                        var index = next.indexOf(\(str(value)));
+                        if (index !== -1) {
+                            next.splice(index, 1);
+                        } else {
+                            next.push(\(str(value)));
                         }
-                    }
-                    """
-                
+                    """)
+
             case .scrollTo(let ref, let behavior, let alignment):
-                let refId = ref ?? builderId
+                // without a ref, this element: its registered global (its builderId is a class, not an id)
                 script += """
-                    var element = \(byId(refId));
-                    element.scrollIntoView({ behavior: '\(behavior.rawValue)', block: '\(alignment.rawValue)', inline: '\(alignment.rawValue)' });
+                    var element = \(target(ref));
+                    if (element) {
+                        element.scrollIntoView({ behavior: '\(behavior.rawValue)', block: '\(alignment.rawValue)', inline: '\(alignment.rawValue)' });
+                    }
                     """
                 
             case .showOffCanvas(let ref):
                 script += """
             var offcanvasElement = \(byId(ref));
             if (offcanvasElement) {
-                var offcanvas = new bootstrap.Offcanvas(offcanvasElement);
-                offcanvas.show();
+                bootstrap.Offcanvas.getOrCreateInstance(offcanvasElement).show();
             }
             """
                 
@@ -594,8 +639,7 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
                 script += """
             var offcanvasElement = \(byId(ref));
             if (offcanvasElement) {
-                var offcanvas = new bootstrap.Offcanvas(offcanvasElement);
-                offcanvas.hide();
+                bootstrap.Offcanvas.getOrCreateInstance(offcanvasElement).hide();
             }
             """
                 
@@ -603,8 +647,7 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
                 script += """
             var carouselElement = \(byId(ref));
             if (carouselElement) {
-                var carousel = new bootstrap.Carousel(carouselElement);
-                carousel.next();
+                bootstrap.Carousel.getOrCreateInstance(carouselElement).next();
             }
             """
                 
@@ -612,8 +655,7 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
                 script += """
             var carouselElement = \(byId(ref));
             if (carouselElement) {
-                var carousel = new bootstrap.Carousel(carouselElement);
-                carousel.prev();
+                bootstrap.Carousel.getOrCreateInstance(carouselElement).prev();
             }
             """
                 
@@ -621,8 +663,7 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
                 script += """
             var carouselElement = \(byId(ref));
             if (carouselElement) {
-                var carousel = new bootstrap.Carousel(carouselElement);
-                carousel.to(\(index));
+                bootstrap.Carousel.getOrCreateInstance(carouselElement).to(\(index));
             }
             """
                 
@@ -630,8 +671,8 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
                 script += """
             var accordionElement = \(byId(ref));
             if (accordionElement) {
-                var accordion = new bootstrap.Collapse(accordionElement);
-                accordion.toggle();
+                // toggle: false, or creating the instance would toggle it once already
+                bootstrap.Collapse.getOrCreateInstance(accordionElement, { toggle: false }).toggle();
             }
             """
                 
@@ -657,11 +698,11 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
             if (spinnerElement) {
                 spinnerElement.classList.remove('spinner-border', 'spinner-grow', 'spinner-border-sm', 'spinner-border-lg', 'spinner-grow-sm', 'spinner-grow-lg');
                 spinnerElement.classList.add(\(str(type.rawValue)));
-                if (\(str(size.rawValue)) != '') {
-                    spinnerElement.classList.add(\(str(size.rawValue)));
-                }
+                spinnerElement.style.width = '';
+                spinnerElement.style.height = '';
+                \(spinnerSizeScript(type: type, size: size))
                 spinnerElement.style.color = \(str(color.rgba));
-                var labelElement = spinnerElement.querySelector('.sr-only');
+                var labelElement = spinnerElement.querySelector('.visually-hidden, .sr-only');
                 if (labelElement) {
                     labelElement.textContent = \(str(label));
                 }
@@ -677,11 +718,12 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
                 if let ref = ref {
                     script += "\(byId(ref)).src = \(str(url));\n"
                 } else {
-                    script += "\(builderId).src(\(str(url)));\n"
+                    script += "\(builderId).src = \(str(url));\n"
                 }
             case .script(let scrpt):
-                // raw JavaScript by design
-                script += scrpt + "\n"
+                // raw JavaScript by design: marked, so a script carrying it gets a <script> element of its own
+                // (see WebScriptOrigin) and a syntax error in it can't stop the page's other scripts
+                script += WebScriptOrigin.rawMarker + scrpt + "\n"
             case .post(
                 url:             let url,
                 values:          let values,
@@ -690,8 +732,8 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
                 onTimeout:       let onTimeout,
                 resultInto:      let resultInto
             ):
-                let id = "\(UUID().uuidString.lowercased().replacingOccurrences(of: "-", with:"").prefix(4))"
-                
+                let id = ids.next()
+
                 // --- build the POST payload ---
                 script += "var postData\(id) = {};\n"
                 for value in values ?? [] {
@@ -722,7 +764,8 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
                 script += "  // 3) success vs. failure based on status code\n"
                 script += "  if (xhr\(id).status >= 200 && xhr\(id).status < 300) {\n"
                 if let resultInto = resultInto {
-                    script += "    \(resultInto.builderId) = xhr\(id).responseText;\n"
+                    // through the variable's updater, so bound controls, its hidden input and callbacks follow
+                    script += "    updateWebVariable\(resultInto.builderId)(xhr\(id).responseText, { source: 'action.post', origin: '\(builderId)' });\n"
                 }
                 if let onSuccessful = onSuccessful {
                     
@@ -735,18 +778,18 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
                                   var status  = xhr\(id).status;
                                   var headers = xhr\(id).getAllResponseHeaders();
                                   var cookie  = cookies;
-                                  \(scriptContent)
+                                  \(WebScriptOrigin.rawMarker)\(scriptContent)
                                 }
                                 """
                         } else {
                             script += "var result = xhr\(id).responseText;\n"
-                            script += CompileActions([action], builderId: builderId)
+                            script += compileActionList([action], builderId: builderId, ids: &ids)
                         }
                     }
                 }
                 script += "  } else {\n"
                 if let onFailed = onFailed {
-                    script += CompileActions(onFailed, builderId: builderId)
+                    script += compileActionList(onFailed, builderId: builderId, ids: &ids)
                 }
                 script += "  }\n"
                 script += "};\n\n"
@@ -755,7 +798,7 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
                 if let onTimeout = onTimeout {
                     // e.g. you could also do: xhr\(id).timeout = 10000; // 10s
                     script += "xhr\(id).ontimeout = function() {\n"
-                    script += CompileActions(onTimeout, builderId: builderId)
+                    script += compileActionList(onTimeout, builderId: builderId, ids: &ids)
                     script += "};\n\n"
                 }
                 
@@ -767,12 +810,20 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
             case .removeClass(let className):
                 script += "\(builderId).classList.remove(\(str(className)));\n"
             case .hidden(ref: let ref, let value):
-                let action = value ? "add" : "remove"
-                script += "\(target(ref)).classList.\(action)('visually-hidden');\n"
+                // The hidden modifiers (`.hidden()`, `.hidden(Bool)`, `.hidden(WBool)`) use `d-none`, as do
+                // `.show(ref:)` / `.hide(ref:)`. Un-hiding also removes the legacy `visually-hidden` class and
+                // any inline `display:none` left by `.hide(ref:)`, so every way of hiding can be undone here.
+                let tHidden = target(ref)
+                if value {
+                    script += "\(tHidden).classList.add('d-none');\n"
+                } else {
+                    script += "\(tHidden).classList.remove('d-none', 'visually-hidden');\n"
+                    script += "\(tHidden).style.display = '';\n"
+                }
             case .if(let variable, let condition, let ifActions, let elseActions):
-                let ifScript = CompileActions(ifActions, builderId: builderId)
+                let ifScript = compileActionList(ifActions, builderId: builderId, ids: &ids)
                 if let elseActions = elseActions {
-                    let elseScript = CompileActions(elseActions, builderId: builderId)
+                    let elseScript = compileActionList(elseActions, builderId: builderId, ids: &ids)
                     script += "if (\(variable.builderId) \(condition.scriptSafeCondition)) {\n\(ifScript)\n} else {\n\(elseScript)\n}\n"
                 } else {
                     script += "if (\(variable.builderId) \(condition.scriptSafeCondition)) {\n\(ifScript)\n}\n"
@@ -802,31 +853,35 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
             case .opacity(ref: let ref, let value):
                 script += "\(target(ref)).style.opacity = \(ScriptValue.number(value));\n"
             case .random(let actions):
-                let id = UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+                let id = ids.next()
                 script += "var randomIndex\(id) = Math.floor(Math.random() * \(actions.count));\n"
                 script += "var functions\(id) = [];\n"
                 for action in actions {
                     script += "functions\(id).push(function() {\n"
-                    script += CompileActions([action], builderId: builderId)
+                    script += compileActionList([action], builderId: builderId, ids: &ids)
                     script += "});\n"
                 }
                 script += "functions\(id)[randomIndex\(id)]();\n"
             case .showModal(ref: let ref, contentURL: let contentURL):
+                // Bootstrap's instance for the modal element with id `ref`. (This used to call a global
+                // `<md5 of ref>ModalDialog` that nothing ever defined, so the action threw a ReferenceError.)
                 if let contentURL = contentURL {
+                    // The fetched HTML goes into the modal body as markup (`innerHTML`): its <script>
+                    // elements do not run, as before.
                     script += """
                 fetch(\(str(contentURL)))
-                    .then(response => response.text())
-                    .then(data => {
-                        \(byId(ref)).querySelector('.modal-body').innerHTML = data;
-                        \(ref.md5.trimmingCharacters(in: CharacterSet.decimalDigits))ModalDialog.show();
+                    .then(function (response) { return response.text(); })
+                    .then(function (data) {
+                        var modalElement = \(byId(ref));
+                        if (!modalElement) { return; }
+                        var modalBody = modalElement.querySelector('.modal-body');
+                        if (modalBody) { modalBody.innerHTML = data; }
+                        if (typeof bootstrap !== 'undefined') { bootstrap.Modal.getOrCreateInstance(modalElement).show(); }
                     });
+
                 """
                 } else {
-                    script += """
-                if(\(ref.md5.trimmingCharacters(in: CharacterSet.decimalDigits))ModalDialog) {
-                    \(ref.md5.trimmingCharacters(in: CharacterSet.decimalDigits))ModalDialog.show();
-                }
-                """
+                    script += "(function(el){ if (el && typeof bootstrap !== 'undefined') { bootstrap.Modal.getOrCreateInstance(el).show(); } })(\(byId(ref)));\n"
                 }
             case .collapse(ref: let ref):
                 script += """
@@ -835,14 +890,10 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
             });
             """
             case .hideModal(ref: let ref):
-                script += """
-            if(\(ref.md5.trimmingCharacters(in: CharacterSet.decimalDigits))ModalDialog) {
-                \(ref.md5.trimmingCharacters(in: CharacterSet.decimalDigits))ModalDialog.hide();
-            }
-            """
+                script += "(function(el){ if (el && typeof bootstrap !== 'undefined') { bootstrap.Modal.getOrCreateInstance(el).hide(); } })(\(byId(ref)));\n"
             case .popover(title: let title, content: let content):
                 script += """
-            var popover = new bootstrap.Popover(\(builderId), {
+            var popover = bootstrap.Popover.getOrCreateInstance(\(builderId), {
                 title: \(str(title)),
                 content: \(str(content))
             });
@@ -855,13 +906,28 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
             case .setInput(let inputName, to: let to):
                 script += "document.getElementsByName(\(str(inputName)))[0].value = \(ScriptValue.loose(to));\n"
             case .setVariableName(let variableName, to: let to):
-                script += "set\(variableName.md5)(\(ScriptValue.loose(to)));\n"
+                // The variable is found at run time by the name given with `.name(...)`, which its hidden
+                // carrier keeps in `data-wsui-name`. (This used to call a `set<md5 of name>` function that
+                // nothing defined, so the action always threw a ReferenceError.)
+                script += """
+                    (function () {
+                        var carriers = document.querySelectorAll('input[data-wsui-name]');
+                        for (var i = 0; i < carriers.length; i++) {
+                            if (carriers[i].getAttribute('data-wsui-name') !== \(str(variableName))) { continue; }
+                            if (carriers[i].id.indexOf('hiddenInput_') !== 0) { continue; }
+                            var update = window['updateWebVariable' + carriers[i].id.slice(12)];
+                            if (typeof update === 'function') {
+                                update(\(ScriptValue.loose(to)), { source: 'action.setVariableName', origin: '\(builderId)' });
+                            }
+                        }
+                    })();
+
+                    """
             case .extractJSON(key: let key, actions: let actions):
                 // Parse JSON from `result` only (string or object) and expose a new scoped `result` for subsequent actions.
-                let nested = CompileActions(actions, builderId: builderId)
+                let nested = compileActionList(actions, builderId: builderId, ids: &ids)
                 script += #"""
-            (function(){
-                var __source = (typeof result !== 'undefined') ? result : null;
+            (function(__source){
                 var __obj = null;
                 try {
                     if (__source === null || typeof __source === 'undefined') {
@@ -895,14 +961,13 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
                     }
                 }
             
-                // Shadow result within this scope for subsequent compiled actions
-                var result = __extracted;
-            
-                // Execute nested actions in the context of this new result
-                (function(){
+                // Run the nested actions with result bound to the extracted value. (A var named result
+                // declared in this function would be hoisted over the outer result, so the outer value is
+                // passed in as __source instead.)
+                (function(result){
                     \#(nested)
-                })();
-            })();
+                })(__extracted);
+            })((typeof result !== 'undefined') ? result : null);
             """#
             case .extractJSONInto(key: let key, into: let variable):
                 // Extract a value from JSON in `result` and write it into the specified variable.
@@ -947,8 +1012,8 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
             })();
             """#
             case .evaluate(op: let op, let ifTrue, let ifFalse):
-                let ifScript = CompileActions(ifTrue, builderId: builderId)
-                let elseScript = ifFalse.map { CompileActions($0, builderId: builderId) }
+                let ifScript = compileActionList(ifTrue, builderId: builderId, ids: &ids)
+                let elseScript = ifFalse.map { compileActionList($0, builderId: builderId, ids: &ids) }
                 script += """
             (function(){
                 var __cond = false;
@@ -1017,7 +1082,7 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
                 
             case .animate(let ref, let keyframes, let options):
                 // `keyframes` and `options` are JavaScript expressions by design
-                script += "(function(el){ if(!el||!el.animate) return; el.animate(\(keyframes), \(options)); })(\(target(ref)));\n"
+                script += "(function(el){ if(!el||!el.animate) return; el.animate(\(WebScriptOrigin.rawMarker)\(keyframes), \(options)); })(\(target(ref)));\n"
             case .addClassFor(let ref, let className, let durationMs):
                 let classJS = str(className)
                 script += "(function(el){ if(!el) return; el.classList.add(\(classJS)); setTimeout(function(){ el.classList.remove(\(classJS)); }, \(durationMs)); })(\(target(ref)));\n"
@@ -1040,7 +1105,7 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
                 script += "(function(txt){ if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(String(txt)); } else { var ta = document.createElement('textarea'); ta.value = String(txt); document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); } catch(e){} document.body.removeChild(ta); } })(\(value.builderId));\n"
                 
             case .get(let url, let params, let onSuccessful, let onFailed, let onTimeout, let resultInto):
-                let gid = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(4)
+                let gid = ids.next()
                 // Build URL with query parameters
                 script += "var baseUrl\(gid) = \(str(url));\n"
                 script += "var qp\(gid) = [];\n"
@@ -1075,23 +1140,23 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
                 script += "  if (xhr\(gid).readyState !== 4) return;\n"
                 script += "  if (xhr\(gid).status >= 200 && xhr\(gid).status < 300) {\n"
                 if let resultInto = resultInto {
-                    script += "    \(resultInto.builderId) = xhr\(gid).responseText;\n"
+                    script += "    updateWebVariable\(resultInto.builderId)(xhr\(gid).responseText, { source: 'action.get', origin: '\(builderId)' });\n"
                 }
                 if let onSuccessful = onSuccessful {
                     script += "var result = xhr\(gid).responseText;\n"
                     for a in onSuccessful {
-                        script += CompileActions([a], builderId: builderId)
+                        script += compileActionList([a], builderId: builderId, ids: &ids)
                     }
                 }
                 script += "  } else {\n"
                 if let onFailed = onFailed {
-                    script += CompileActions(onFailed, builderId: builderId)
+                    script += compileActionList(onFailed, builderId: builderId, ids: &ids)
                 }
                 script += "  }\n";
                 script += "};\n"
                 if let onTimeout = onTimeout {
                     script += "xhr\(gid).ontimeout = function(){\n"
-                    script += CompileActions(onTimeout, builderId: builderId)
+                    script += compileActionList(onTimeout, builderId: builderId, ids: &ids)
                     script += "};\n"
                 }
                 script += "xhr\(gid).send();\n"
@@ -1123,18 +1188,18 @@ public func CompileActions(_ actions: [WebAction], builderId: String) -> String 
             case .tabShow(let ref):
                 script += "(function(){ var el = \(byId(ref)); if(!el) return; var tab = new bootstrap.Tab(el); tab.show(); })();\n"
             case .delay(let seconds, let actions):
-                let nested = CompileActions(actions, builderId: builderId)
+                let nested = compileActionList(actions, builderId: builderId, ids: &ids)
                 script += "setTimeout(function(){\n\(nested)\n}, \(ScriptValue.milliseconds(fromSeconds: seconds)));\n"
             case .alert(let message):
                 script += "window.alert(\(str(message)));\n"
             case .confirm(let message, let ifYes, let ifNo):
-                let yesScript = CompileActions(ifYes, builderId: builderId)
-                let noScript = ifNo.map { CompileActions($0, builderId: builderId) } ?? ""
+                let yesScript = compileActionList(ifYes, builderId: builderId, ids: &ids)
+                let noScript = ifNo.map { compileActionList($0, builderId: builderId, ids: &ids) } ?? ""
                 script += "if (window.confirm(\(str(message)))) {\n\(yesScript)\n} else {\n\(noScript)\n}\n"
                 
             case .setVariableFromExpression(let into, let expression):
                 // `expression` is a JavaScript expression by design
-                script += "updateWebVariable\(into.builderId)((function(){ try { return (\(expression)); } catch(e){ return null; } })(), { source: 'action.setVariableFromExpression', origin: '\(builderId)' });\n"
+                script += "updateWebVariable\(into.builderId)((function(){ try { return (\(WebScriptOrigin.rawMarker)\(expression)); } catch(e){ return null; } })(), { source: 'action.setVariableFromExpression', origin: '\(builderId)' });\n"
             case .regexExtract(let source, let pattern, let group, let into):
                 script += "(function(s, re, g){ try { var r = new RegExp(re).exec(String(s)); var v = (r && r.length > g) ? r[g] : null; updateWebVariable\(into.builderId)(v, { source: 'action.regexExtract', origin: '\(builderId)' }); } catch(e){ updateWebVariable\(into.builderId)(null, { source: 'action.regexExtract', origin: '\(builderId)' }); } })(\(source.builderId), \(str(pattern)), \(group));\n"
                 

@@ -3,7 +3,8 @@
 //  WSwiftUITests
 //
 //  C1: response splitting / header injection / cookie fixation through ?token=,
-//  and the session cookie (re)issue rules.
+//  and the session cookie (re)issue rules. Since Phase 1 a response sets the cookie
+//  only when the session changes (see Phase1Session*Tests.swift for the full matrix).
 //
 
 import Foundation
@@ -72,8 +73,6 @@ final class HttpSessionJSONApi: CoreWebEndpoint, WebEndpoint, WebApiEndpoint {
 
 enum HttpSessionHelpers {
 
-    static let anonymousCookie = "auth=; Path=/; Max-Age=3600; HttpOnly; SameSite=Lax"
-
     static func cookie(_ value: String) -> String {
         return "auth=\(value); Path=/; Max-Age=3600; HttpOnly; SameSite=Lax"
     }
@@ -116,27 +115,35 @@ struct HttpSessionQueryTokenTests {
         #expect(response.status.code == 200)
         #expect(HttpSessionHelpers.hasNoLineBreaks(response))
         #expect(response.header(named: "X-Injected") == nil)
-        #expect(response.allHeaders(named: "Set-Cookie") == [HttpSessionHelpers.anonymousCookie])
+        #expect(response.allHeaders(named: "Set-Cookie").isEmpty)
     }
 
     @Test func queryCookieAttributeInjectionIsIgnoredByDefault() {
         let server = HttpSessionHelpers.server()
         let response = server.respond(to: TestHTTP.request(.GET, "/session-probe?token=abc%3B%20Domain%3Dexample.com%3B%20Max-Age%3D999999999"))
-        #expect(response.allHeaders(named: "Set-Cookie") == [HttpSessionHelpers.anonymousCookie])
+        #expect(response.allHeaders(named: "Set-Cookie").isEmpty)
     }
 
     @Test func queryTokenDoesNotReplaceTheCookieByDefault() {
         let server = HttpSessionHelpers.server()
         let response = server.respond(to: TestHTTP.request(.GET, "/session-probe?token=attacker",
                                                            headers: [("Cookie", "auth=goodtoken")]))
-        #expect(response.allHeaders(named: "Set-Cookie") == [HttpSessionHelpers.cookie("goodtoken")])
+        #expect(response.allHeaders(named: "Set-Cookie").isEmpty)
+        // on an authenticated page the cookie, not the query token, is used and renewed
+        let renewed = server.respond(to: TestHTTP.request(.GET, "/session-private?token=attacker",
+                                                          headers: [("Cookie", "auth=good-token")]))
+        #expect(renewed.status.code == 200)
+        #expect(renewed.allHeaders(named: "Set-Cookie") == [HttpSessionHelpers.cookie("good-token")])
     }
 
     @Test func emptyQueryTokenDoesNotLogTheUserOut() {
         let server = HttpSessionHelpers.server()
         let response = server.respond(to: TestHTTP.request(.GET, "/session-probe?token",
                                                            headers: [("Cookie", "auth=victim")]))
-        #expect(response.allHeaders(named: "Set-Cookie") == [HttpSessionHelpers.cookie("victim")])
+        #expect(response.allHeaders(named: "Set-Cookie").isEmpty)
+        let renewed = server.respond(to: TestHTTP.request(.GET, "/session-private?token",
+                                                          headers: [("Cookie", "auth=good-token")]))
+        #expect(renewed.allHeaders(named: "Set-Cookie") == [HttpSessionHelpers.cookie("good-token")])
     }
 
     @Test func queryTokenDoesNotAuthenticateByDefault() {
@@ -191,10 +198,11 @@ struct HttpSessionQueryTokenTests {
 @Suite("HTTP session: cookie issue rules")
 struct HttpSessionCookieRuleTests {
 
-    @Test func cookieTokenIsReissued() {
+    /// A public page never validates the cookie, so it neither renews nor clears it.
+    @Test func publicPageDoesNotReissueTheCookie() {
         let server = HttpSessionHelpers.server()
         let response = server.respond(to: TestHTTP.request(.GET, "/session-probe", headers: [("Cookie", "auth=tok-123")]))
-        #expect(response.allHeaders(named: "Set-Cookie") == [HttpSessionHelpers.cookie("tok-123")])
+        #expect(response.allHeaders(named: "Set-Cookie").isEmpty)
     }
 
     @Test func authenticatedCookieTokenIsReissued() {
@@ -204,16 +212,19 @@ struct HttpSessionCookieRuleTests {
         #expect(response.allHeaders(named: "Set-Cookie") == [HttpSessionHelpers.cookie("good-token")])
     }
 
-    @Test func bearerTokenIsReissuedAsBefore() {
+    @Test func bearerTokenIsNeverWrittenToACookie() {
         let server = HttpSessionHelpers.server()
         let response = server.respond(to: TestHTTP.request(.GET, "/session-probe", headers: [("Authorization", "Bearer tok-b")]))
-        #expect(response.allHeaders(named: "Set-Cookie") == [HttpSessionHelpers.cookie("tok-b")])
+        #expect(response.allHeaders(named: "Set-Cookie").isEmpty)
+        let authenticated = server.respond(to: TestHTTP.request(.GET, "/session-private", headers: [("Authorization", "Bearer good-token")]))
+        #expect(authenticated.status.code == 200)
+        #expect(authenticated.allHeaders(named: "Set-Cookie").isEmpty)
     }
 
-    @Test func anonymousRequestKeepsTheEmptyCookie() {
+    @Test func anonymousRequestGetsNoCookie() {
         let server = HttpSessionHelpers.server()
         let response = server.respond(to: TestHTTP.request(.GET, "/session-probe"))
-        #expect(response.allHeaders(named: "Set-Cookie") == [HttpSessionHelpers.anonymousCookie])
+        #expect(response.allHeaders(named: "Set-Cookie").isEmpty)
     }
 
     @Test func authenticateSessionTokenIsIssued() {
@@ -228,10 +239,10 @@ struct HttpSessionCookieRuleTests {
     @Test func jsonResponsesFollowTheSameRules() {
         let server = HttpSessionHelpers.server()
         let withCookie = server.respond(to: TestHTTP.request(.GET, "/session-json", headers: [("Cookie", "auth=tok-j")]))
-        #expect(withCookie.allHeaders(named: "Set-Cookie") == [HttpSessionHelpers.cookie("tok-j")])
+        #expect(withCookie.allHeaders(named: "Set-Cookie").isEmpty)
         let injected = server.respond(to: TestHTTP.request(.GET, "/session-json?token=\(HttpSessionHelpers.crlfToken)"))
         #expect(HttpSessionHelpers.hasNoLineBreaks(injected))
-        #expect(injected.allHeaders(named: "Set-Cookie") == [HttpSessionHelpers.anonymousCookie])
+        #expect(injected.allHeaders(named: "Set-Cookie").isEmpty)
     }
 
     @Test func redirectFollowsTheSameRules() {
@@ -240,15 +251,15 @@ struct HttpSessionCookieRuleTests {
         let withCookie = server.respond(to: TestHTTP.request(.GET, "/session-redirect", headers: [("Cookie", "auth=tok-r")]))
         #expect(withCookie.status.code == 302)
         #expect(withCookie.header(named: "Location") == "/next")
-        #expect(withCookie.allHeaders(named: "Set-Cookie") == [HttpSessionHelpers.cookie("tok-r")])
+        #expect(withCookie.allHeaders(named: "Set-Cookie").isEmpty)
 
         let injected = server.respond(to: TestHTTP.request(.GET, "/session-redirect?token=\(HttpSessionHelpers.crlfToken)"))
         #expect(HttpSessionHelpers.hasNoLineBreaks(injected))
-        #expect(injected.allHeaders(named: "Set-Cookie") == [HttpSessionHelpers.anonymousCookie])
+        #expect(injected.allHeaders(named: "Set-Cookie").isEmpty)
 
         let fixation = server.respond(to: TestHTTP.request(.GET, "/session-redirect?token=attacker",
                                                            headers: [("Cookie", "auth=victim")]))
-        #expect(fixation.allHeaders(named: "Set-Cookie") == [HttpSessionHelpers.cookie("victim")])
+        #expect(fixation.allHeaders(named: "Set-Cookie").isEmpty)
 
         let login = server.respond(to: TestHTTP.request(.GET, "/session-login-redirect?token=attacker"))
         #expect(login.header(named: "Location") == "/dashboard")
@@ -263,12 +274,23 @@ struct HttpSessionCookieRuleTests {
         #expect(response.allHeaders(named: "Set-Cookie").isEmpty)
     }
 
-    @Test func cookieValueDecision() {
-        #expect(SessionCookie.value(newIdentifier: "n", currentIdentifier: "c", source: .queryParameter) == "n")
-        #expect(SessionCookie.value(newIdentifier: nil, currentIdentifier: "c", source: .queryParameter) == nil)
-        #expect(SessionCookie.value(newIdentifier: nil, currentIdentifier: "c", source: .cookie) == "c")
-        #expect(SessionCookie.value(newIdentifier: nil, currentIdentifier: "c", source: .bearerHeader) == "c")
-        #expect(SessionCookie.value(newIdentifier: nil, currentIdentifier: nil, source: .none) == "")
+    /// The Phase 0 cookieValueDecision cases under the Phase 1 decision (SessionRequestContext.decision).
+    @Test func cookieDecision() {
+        func decision(_ headers: [(String, String)], _ uri: String = "/",
+                      accepted: Bool = true, establish: String? = nil) -> SessionChange {
+            let context = SessionRequestContext(request: TestHTTP.request(.GET, uri, headers: headers),
+                                                config: WebSessionConfig(acceptQueryToken: true),
+                                                publicBaseURLIsHTTPS: false, onSessionEnded: nil)
+            if accepted { context.credentialAccepted() }
+            if let establish { context.establish(token: establish, expiry: nil) }
+            return context.decision
+        }
+        #expect(decision([("Cookie", "auth=c")], "/?token=q", establish: "n") == .established(token: "n", expiry: nil))
+        #expect(decision([("Cookie", "auth=c")], "/?token=q") == .none)
+        #expect(decision([("Cookie", "auth=c")]) == .renewed(token: "c"))
+        #expect(decision([("Cookie", "auth=c")], accepted: false) == .none)
+        #expect(decision([("Authorization", "Bearer c")]) == .none)
+        #expect(decision([]) == .none)
     }
 
     @Test func credentialSources() {
@@ -282,8 +304,9 @@ struct HttpSessionCookieRuleTests {
         let none = TestHTTP.request(.GET, "/?token=q")
         #expect(none.authenticationCredential(acceptQueryToken: false) == nil)
 
+        // a non-Bearer Authorization header (e.g. Basic auth at a proxy) falls through to the cookie
         let basic = TestHTTP.request(.GET, "/", headers: [("Authorization", "Basic xyz"), ("Cookie", "auth=c")])
-        #expect(basic.authenticationCredential(acceptQueryToken: false) == nil)
+        #expect(basic.authenticationCredential(acceptQueryToken: false) == AuthenticationCredential(token: "c", source: .cookie))
     }
 }
 

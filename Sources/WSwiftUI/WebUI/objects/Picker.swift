@@ -69,9 +69,10 @@ public extension CoreWebEndpoint {
                 _ content: WebComposerClosure)
     -> WebPickerElement {
         
-        // update with previous session data
-        updateWithEphermeralData(binding)
-        
+        // update with previous session data. A color picker renders no control, so it leaves the field to
+        // the variable's hidden input.
+        updateWithEphermeralData(binding, claimsFieldName: type != .colorPicker)
+
         switch type {
             case .combo:
                 let picker = createPicker { el in
@@ -79,8 +80,8 @@ public extension CoreWebEndpoint {
                     el.class("form-select")
                     el.class("wsui-picker")
                     el.value = binding
-                    if binding.errorMessage != nil {
-                        el.addAttribute(.errorMessage(binding.errorMessage!))
+                    if let message = binding.errorMessage {
+                        el.addAttribute(.errorMessage(message))
                     }
                     el.type = type
                     el.addAttribute(.custom("onchange=\"updateWebVariable\(binding.builderId)(this.value, { source: 'change', origin: '\(el.builderId)' });\""))
@@ -95,27 +96,24 @@ public extension CoreWebEndpoint {
                         el.name(binding)
                     }
                 }
-                stack.append(picker)
                 // items go here
-                content()
-                // pop menu and picker
-                stack.removeAll(where: { $0.builderId == picker.builderId })
-                return picker
+                return withParent(picker, content)
             case .segmented:
                 let picker = createPicker { el in
                     el.elementName = "div"
+                    // (no `btn-group-toggle`: a Bootstrap 4 class that Bootstrap 5 doesn't define)
                     el.class("btn-group")
-                    el.class("btn-group-toggle")
                     el.addAttribute(.pair("role", "group"))
-                    if binding.errorMessage != nil {
-                        el.addAttribute(.errorMessage(binding.errorMessage!))
+                    if let message = binding.errorMessage {
+                        el.addAttribute(.errorMessage(message))
                     }
                     el.value = binding
                     el.type = type
                 }
-                stack.append(picker)
                 // items go here
-                content()
+                withParent(picker, content)
+                // The hidden input goes after the group, not inside it: as the group's last child it would
+                // match `.btn-group > .btn:not(:last-child)`'s sibling rules and square off the last button.
                 if let varName = binding.internalName {
                     _ = create { element in
                         element.elementName = "input"
@@ -131,31 +129,27 @@ public extension CoreWebEndpoint {
                         """)
                     }
                 }
-                // pop menu and picker
-                stack.removeAll(where: { $0.builderId == picker.builderId })
                 return picker
             case .radio:
                 // basically, we do nothing as a radio is all controlled from it's parents id
                 let picker = createPicker { el in
                     el.elementName = "div"
                     el.value = binding
-                    if binding.errorMessage != nil {
-                        el.addAttribute(.errorMessage(binding.errorMessage!))
+                    if let message = binding.errorMessage {
+                        el.addAttribute(.errorMessage(message))
                     }
                     el.type = type
                 }
-                stack.append(picker)
                 // items go here
-                content()
-                // pop menu and picker
-                stack.removeAll(where: { $0.builderId == picker.builderId })
-                return picker
+                return withParent(picker, content)
             case .colorPicker:
-                break;
+                // Not implemented: nothing is rendered and the content is not run. This used to happen
+                // silently; it is now reported like other builder misuse.
+                misuse("Picker type .colorPicker (style .color) is not implemented: the picker and its content are not rendered")
         }
-        
+
         return WebPickerElement()
-        
+
     }
     
     @discardableResult

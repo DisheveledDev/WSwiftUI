@@ -60,11 +60,12 @@ public extension WebListGroupItemElement {
         return self
     }
 
-    /// Marks item disabled
+    /// Marks item disabled (`.disabled` and `aria-disabled="true"`, as in Bootstrap's list group markup)
     @discardableResult
     func disabled(_ on: Bool = true) -> Self {
         if on {
             addAttribute(.class("disabled"))
+            addAttribute(.pair("aria-disabled", "true"))
         }
         return self
     }
@@ -80,28 +81,29 @@ public extension CoreWebEndpoint {
         group.elementName = "ul"
         group.addAttribute(.class("list-group"))
         group.addAttribute(.class("wsui-list-group"))
-        stack.append(group)
-        content()
-        stack.removeAll(where: { $0.builderId == group.builderId })
-        return group
+        return withParent(group, content)
     }
 
     /// Creates a <li class="list-group-item [variants] [active] [disabled]">title</li>
+    ///
+    /// Must sit inside a `ListGroup { ... }` (wrapper elements in between are allowed). Anywhere else the
+    /// mistake is logged, an HTML comment marks the spot and the item is rendered where it was declared.
     @discardableResult
     func ListGroupItem(_ title: String,
                        variant: BootstrapVariant? = nil,
                        active: Bool = false,
                        disabled: Bool = false) -> WebListGroupItemElement {
-        guard let _ = stack.last as? WebListGroupElement else {
-            fatalError("ListGroupItem must be inside ListGroup { ... } block")
-        }
+        requireStructuralParent({ $0 is WebListGroupElement }, among: { $0 is WebListGroupElement },
+                                "ListGroupItem must be inside ListGroup { ... } block")
         let item = WebListGroupItemElement()
         populateCreatedObject(item)
         item.elementName = "li"
         item.addAttribute(.class("list-group-item"))
         if let v = variant { item.variant(v) }
         if active { item.active() }
-        if disabled { item.disabled() }
+        // `item.disabled()` would call WebElement's argument-less disabled(), which only adds a `disabled`
+        // attribute (meaningless on an <li>), not the list group's disabled styling
+        if disabled { item.disabled(true) }
         item.innerHTML(WebEscape.html(title))
         return item
     }

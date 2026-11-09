@@ -77,7 +77,7 @@ internal enum HTTPHeaderValidation {
     /// Logs one line for a dropped header. Only a sanitised, truncated name is printed:
     /// never the value, which may hold a session token or attacker-controlled bytes.
     static func logDropped(_ what: String, name: String, reason: String) {
-        print("[WSwiftUI] Dropped \(what) \"\(printable(name))\": \(reason)")
+        WSwiftUIDiagnostics.log("[WSwiftUI] Dropped \(what) \"\(printable(name))\": \(reason)")
     }
 
     /// Replaces control and non-ASCII characters so the text cannot forge log lines.

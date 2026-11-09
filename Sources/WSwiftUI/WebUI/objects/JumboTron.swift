@@ -18,7 +18,8 @@ public extension CoreWebEndpoint {
   ///
   /// - Parameters:
   ///   - fluid: if true, uses `.container-fluid`; otherwise auto-picks mobile `.container-fluid` and desktop `.container`
-  ///   - bgImageURL: optional URL for a background image
+  ///   - bgImageURL: optional URL for a background image (written as a quoted CSS string, like
+  ///     `backgroundImage(_:)`), shown with `background-size: cover`
   ///   - content: closure in which to call `JumbotronTitle`, `JumbotronSubtitle`, or any other elements
   @discardableResult
   func Jumbotron(
@@ -26,38 +27,35 @@ public extension CoreWebEndpoint {
     bgImageURL: String? = nil,
     _ content: WebComposerClosure
   ) -> WebJumbotronElement {
-    // 1) root <div class="jumbotron p-5 mb-4 bg-light rounded-3">
+    // 1) root <div class="p-5 mb-4 bg-light rounded-3">: Bootstrap 5 dropped the `jumbotron` component
+    //    (and its class) for these utilities, so `jumbotron` is no longer added
     let jumbo = WebJumbotronElement()
     populateCreatedObject(jumbo)
     jumbo.elementName = "div"
-    jumbo.addAttribute(.class("jumbotron p-5 mb-4 bg-light rounded-3"))
+    jumbo.addAttribute(.class("p-5 mb-4 bg-light rounded-3"))
     jumbo.addAttribute(.class("wsui-jumbotron"))
     if let url = bgImageURL {
-      jumbo.addAttribute(.style("background-image: url('\(url)'); background-size: cover;"))
+      // a quoted, escaped CSS string (backgroundImage): the URL used to be written as url('<url>'), so a
+      // quote in it ended the string and the rest became CSS declarations
+      jumbo.backgroundImage(url)
+      jumbo.style("background-size: cover")
     }
 
-    // push the jumbotron
-    stack.append(jumbo)
+    // open the jumbotron
+    return withParent(jumbo) {
+      // 2) inner container
+      let container = WebElement()
+      populateCreatedObject(container)
+      container.elementName = "div"
+      if fluid {
+        container.addAttribute(.class("container-fluid"))
+      } else {
+        container.deviceClass(mobile: "container-fluid", desktop: "container")
+      }
 
-    // 2) inner container
-    let container = WebElement()
-    populateCreatedObject(container)
-    container.elementName = "div"
-    if fluid {
-      container.addAttribute(.class("container-fluid"))
-    } else {
-      container.deviceClass(mobile: "container-fluid", desktop: "container")
+      // 3) user content (titles, buttons, etc.)
+      withParent(container, content)
     }
-    stack.append(container)
-
-    // 3) user content (titles, buttons, etc.)
-    content()
-
-    // 4) pop container + jumbo
-    stack.removeLast()
-    stack.removeLast()
-
-    return jumbo
   }
 
   /// A large heading inside a Jumbotron

@@ -6,7 +6,10 @@
 //
 import Foundation
 
-public class WebImageElement: WebElement {}
+public class WebImageElement: WebElement {
+    /// The endpoint that built the image, for reporting misuse found by its modifiers.
+    internal weak var builder: CoreWebEndpoint?
+}
 
 public extension WebImageElement {
 
@@ -46,12 +49,19 @@ public extension WebImageElement {
         return self
     }
     
-    /// reload the contents of the image every x seconds
+    /// Reloads the contents of the image every `seconds` seconds.
+    ///
+    /// The interval is at least 0.1 s, and at most about 24.8 days (2^31 - 1 ms, the longest delay a
+    /// browser timer holds; a longer one would fire after 1 ms), so `.infinity` reloads practically never.
+    /// `seconds` that is not a number (NaN) is reported as builder misuse and adds no reload.
     @discardableResult
     func reloadImage(seconds: Double) -> Self {
-        // Clamp to a minimum interval to avoid 0 or negative values
-        let clampedSeconds = max(seconds, 0.1)
-        let intervalMs = Int(clampedSeconds * 1000)
+        guard seconds.isNaN == false else {
+            // `Int(NaN * 1000)` used to stop the process
+            builder?.misuse("reloadImage(seconds:) needs a number of seconds (got NaN); the image is not reloaded")
+            return self
+        }
+        let intervalMs = imageReloadIntervalMilliseconds(seconds)
         let id = self.builderId
 
         let js = """
@@ -113,13 +123,22 @@ public extension CoreWebEndpoint {
     
     @discardableResult
     func Image(_ src: String, alt: String = "") -> WebImageElement {
+        // (the builderId class, which `reloadImage` targets, comes from populateCreatedObject)
         let img: WebImageElement = create { el in
             el.elementName = "img"
-            el.class(el.builderId)       // so we can target it via JS/CSS if needed
             el.src(src)
             if !alt.isEmpty { el.alt(alt) }
+            el.builder = self
         }
         return img
     }
+}
+
+/// The `setInterval` delay for `reloadImage(seconds:)`: `seconds` (not NaN) in whole milliseconds, at least
+/// 100 and at most 2^31 - 1. Converting an infinite or huge `seconds` to Int used to stop the process.
+fileprivate func imageReloadIntervalMilliseconds(_ seconds: Double) -> Int {
+    let maxMilliseconds = 2_147_483_647.0
+    let milliseconds = (Swift.max(seconds, 0.1) * 1000).rounded(.towardZero)
+    return Int(Swift.min(milliseconds, maxMilliseconds))
 }
 

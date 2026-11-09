@@ -139,7 +139,10 @@ enum ActionCatalog {
             ("setVariable(to: non-primitive)", ActionSpec(make: { f in [.setVariable(f.s, to: [H])] },
                                                           observe: [String(describing: [H])])),
             ("setInput", ActionSpec(make: { _ in [.setInput(H, to: H)] }, observe: [H])),
-            ("setVariableName", ActionSpec(make: { _ in [.setVariableName(H, to: H)] }, observe: [H])),
+            // the variable is found by its carrier's data-wsui-name, and its updater gets the value
+            ("setVariableName", ActionSpec(make: { _ in [.setVariableName(H, to: H)] }, observe: [H],
+                                           globals: ["document": "{ querySelectorAll: function () { return [{ id: 'hiddenInput_vx', getAttribute: function () { return \(Hostile.jsonLiteral(H)); } }]; } }",
+                                                     "window": "{ updateWebVariablevx: __deep('updateWebVariablevx') }"])),
             ("addClass", ActionSpec(make: { _ in [.addClass(H)] }, observe: [H])),
             ("removeClass", ActionSpec(make: { _ in [.removeClass(H)] }, observe: [H])),
             ("if(.equals(String))", ActionSpec(make: { f in
@@ -297,7 +300,10 @@ struct ScriptContextActionsTests {
         }
         ScriptScan.expectNoBreakout(html)
         let scripts = ScriptScan.inlineScripts(in: html)
-        #expect(scripts.count > ActionCatalog.names.count)
+        // the element scripts share the end-of-body block (raw-JS actions get a <script> of their own); every
+        // button's click listener is in one of them
+        #expect(scripts.isEmpty == false)
+        #expect(scripts.joined().components(separatedBy: ".addEventListener('click'").count - 1 == ActionCatalog.names.count)
         let diagnostics = try NodeJS.nodeCheck(scripts)
         #expect(diagnostics.isEmpty, "\(diagnostics.prefix(4000))")
     }

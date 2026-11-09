@@ -40,11 +40,14 @@ public extension WebFileUploaderElement {
         return self
     }
     
-    /// Attach extra fields (e.g. auth tokens) sent with each request
+    /// Attach extra fields (e.g. auth tokens) sent with each request. They are written as JSON with sorted
+    /// keys, so the same fields always give the same page.
     @discardableResult
     func extraFields(_ fields: [String: String]) -> Self {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
         if !fields.isEmpty,
-           let json = try? String(data: JSONEncoder().encode(fields), encoding: .utf8) {
+           let json = try? String(data: encoder.encode(fields), encoding: .utf8) {
             // Pass the raw JSON: `.pair` values are HTML-escaped by the renderer, so escaping the
             // quotes here as well would double-escape them and break `JSON.parse` on the client.
             addAttribute(.pair("data-extra", json))
@@ -100,39 +103,43 @@ public extension CoreWebEndpoint {
                 .extraFields(extraFields)
         }
         
-        // Put uploader on the stack so user content nests inside it
-        stack.append(uploader)
-        content()
-        
-        // Progress UI
-        _ = createUploader { el in
-            el.elementName = "div"
-            el.class("progress")
-            el.class("mt-2")
-            el.addAttribute(.pair("style", "pointer-events:none;"))
-            el.addAttribute(.pair("id", "progress_\(uploader.builderId)"))
-            
-            _ = createUploader { bar in
-                bar.elementName = "div"
-                bar.class("progress-bar")
-                bar.addAttribute(.pair("role", "progressbar"))
-                bar.addAttribute(.pair("style", "width:0%"))
-                bar.addAttribute(.pair("aria-valuemin", "0"))
-                bar.addAttribute(.pair("aria-valuemax", "100"))
-                bar.addAttribute(.pair("aria-valuenow", "0"))
-                bar.addAttribute(.pair("id", "progressbar_\(uploader.builderId)"))
+        // Put uploader on the stack so user content nests inside it, followed by the progress UI and the
+        // hidden file input
+        withParent(uploader) {
+            content()
+
+            // Progress UI: the bar inside its track (it used to be created next to the track, so the bar
+            // was drawn under an empty grey track)
+            let track = createUploader { el in
+                el.elementName = "div"
+                el.class("progress")
+                el.class("mt-2")
+                el.addAttribute(.pair("style", "pointer-events:none;"))
+                el.addAttribute(.pair("id", "progress_\(uploader.builderId)"))
+            }
+            withParent(track) {
+                _ = createUploader { bar in
+                    bar.elementName = "div"
+                    bar.class("progress-bar")
+                    bar.addAttribute(.pair("role", "progressbar"))
+                    bar.addAttribute(.pair("style", "width:0%"))
+                    bar.addAttribute(.pair("aria-valuemin", "0"))
+                    bar.addAttribute(.pair("aria-valuemax", "100"))
+                    bar.addAttribute(.pair("aria-valuenow", "0"))
+                    bar.addAttribute(.pair("id", "progressbar_\(uploader.builderId)"))
+                }
+            }
+
+            // Hidden file input for click-to-upload
+            _ = createUploader { input in
+                input.elementName = "input"
+                input.type("file")
+                input.addAttribute(.pair("id", "fileinput_\(uploader.builderId)"))
+                input.addAttribute(.pair("multiple","multiple"))
+                input.addAttribute(.pair("style", "display:none;"))
             }
         }
-        
-        // Hidden file input for click-to-upload
-        _ = createUploader { input in
-            input.elementName = "input"
-            input.type("file")
-            input.addAttribute(.pair("id", "fileinput_\(uploader.builderId)"))
-            input.addAttribute(.pair("multiple","multiple"))
-            input.addAttribute(.pair("style", "display:none;"))
-        }
-        
+
         // Compile actions
         let onUploadJS = onUpload.map { CompileActions($0, builderId: uploader.builderId) } ?? ""
         
@@ -337,9 +344,6 @@ public extension CoreWebEndpoint {
     }
 })();
 """)
-        
-        // Pop uploader from stack
-        stack.removeAll(where: { $0.builderId == uploader.builderId })
         return uploader
     }
 }

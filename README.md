@@ -300,6 +300,26 @@ override func persist() -> Any? {
 }
 ```
 
+To check the submitted values on the server and show the form again with the user's input when a check fails, use `validateData(_:)` in `persist()` and return `content()`:
+
+```swift
+override func persist() -> Any? {
+    guard validateData([
+        .named("email", [.notEmpty, .validEmail]),
+        .named("note", []),                 // no conditions: only keeps what was typed
+    ]) else {
+        return content()                    // same page; typed values and messages are shown again
+    }
+    // save, then redirect
+    return redirect("/done")
+}
+```
+
+- Every field listed in `validateData` keeps its submitted value when the form is shown again, whether it passed or failed, so redirect after a successful save rather than returning `content()`. Password fields are never filled in again, including a `TextField` made a password field with `.type(.password)`.
+- A listed field that was not submitted fails with "This field is required".
+- A `Toggle` submits like a plain checkbox: `<name>=on` when ticked and nothing when not, so `.named("terms", [.notEmpty])` requires it to be ticked.
+- A bound variable's hidden input posts under its `.name(...)`, unless another control in the same form already submits that name.
+
 ---
 
 ## Actions and events
@@ -335,6 +355,18 @@ State-driven overloads are available for:
 - `Sheet(isPresented:...)`
 - `OffCanvas(id:isPresented:...)`
 - `Alert(_:isPresented:...)`
+
+### Element ids and page scripts
+
+- Every element gets a `builderId` such as `kq3xa_1f`: a namespace, an underscore and a counter. It is also the element's CSS class.
+  - By default the namespace is random for each request, so HTML from two requests inserted into one page never shares an id.
+  - Set `elementIdNamespace` (letters and digits, starting with a letter) on an endpoint to render byte-identical HTML for the same page, for example for snapshot tests or ETags. Give each endpoint whose HTML ends up in the same browser page its own namespace.
+- All page scripts run at the end of `<body>`, after every element exists. No `<script>` sits between elements, so Bootstrap's sibling selectors (list-group borders, button-group corners) work.
+- An element is available as a JavaScript global named after its `builderId` only when page code names it: a script, an inline `on…` handler, a `.pair`/`.data` attribute value, a `javascript:` URL, raw `.custom` attributes or HTML, or head code. If your code builds the name at runtime, look the element up with `document.getElementsByClassName(builderId)[0]`.
+- The framework's own scripts share one `<script>` element, and each part runs in its own `try`/`catch`. Scripts you add (`.script(...)`, `.domLoadedScript`, `WebAction.script`, `.handleResponse`, …) each get their own `<script>`, so a mistake in one doesn't stop the others. Each DOMContentLoaded script runs in its own function: `var`s are not shared between them, and a `return` ends only that script.
+- A caught exception goes to the browser's `reportError`, so it is logged as uncaught and `window` `error` listeners (error monitoring) still see it. A `reportError` function your page defines itself is never called; the exception then goes to `console.error`.
+- Inline handlers and `.onClick` actions work once the browser reaches the scripts at the end of `<body>`; until then, on a slow connection, a typed value can be reset by the page-load sync.
+- `.hidden()` hides an element with Bootstrap's `d-none`, the class the `.show(ref:)`/`.hide(ref:)` actions toggle. For content that only screen readers should read, use `.visuallyHidden()`.
 
 ---
 
@@ -420,6 +452,40 @@ In API endpoints:
 
 `MenuIndexable` endpoints are also filtered by auth/roles when the menu tree is built.
 
+### Sessions
+
+Log a user in from a content endpoint with `authenticateSession(token:expiry:)` and out with `deauthenticateSession()`:
+
+```swift
+authenticateSession(token: newToken, expiry: Date() + 86400)   // cookie lasts until expiry
+authenticateSession(token: newToken)                           // cookie lasts maxAge and slides
+deauthenticateSession()                                        // expires the cookie
+```
+
+Sessions are stateless: the cookie holds your token, and `onGetUserRoles` checks it on every authenticated request. Clearing the cookie on logout only affects the browser that receives the response. **Register `onSessionEnded` and revoke the token there**, so a copied cookie or another tab can't keep using it:
+
+```swift
+server.onSessionEnded { token in
+    Database.removeUserToken(token: token)
+}
+```
+
+The handler gets the token in effect, and also the cookie's token when that is a different one (a Bearer header or `?token=` took precedence over it, or `authenticateSession` set a new token earlier in the request), since the logout clears the cookie either way. On a public `/logout` the token hasn't been checked by `onGetUserRoles`, so treat it as a key to delete, not as proof of who the user is.
+
+- `Set-Cookie` is only sent when the session changes: on login and logout, when a no-expiry session slides on an authenticated page, and when an authenticated page rejects the cookie's token. Public pages and anonymous requests never get a session cookie.
+- A token sent as `Authorization: Bearer <token>` authenticates the request but never sets a cookie. Other `Authorization` schemes (such as Basic auth added by a proxy) are ignored. A `?token=` query parameter is ignored unless `acceptQueryToken` is set.
+- The cookie is configured with `server.session`. The defaults:
+
+```swift
+server.session = WebSessionConfig(cookieName: "auth", secure: .auto, sameSite: .lax,
+                                  maxAge: 3600, sliding: true, acceptQueryToken: false)
+```
+
+  With `secure: .auto`, cookies are `Secure` when `publicBaseURL` starts with `https://` or the request's `X-Forwarded-Proto` is `https`. Use `.always` or `.never` to override this. A deployment whose `publicBaseURL` says `https://` but which is reached over plain http will not keep a session.
+
+  Set `server.session` before `server.acceptQueryToken`: assigning `session` replaces the whole configuration.
+- A response to a request whose credential `onGetUserRoles` accepted (an endpoint that requires `.authenticated`), and a login or sliding renewal, carries `Cache-Control: private` unless it sets Cache-Control itself, so a shared cache doesn't store one user's page for others. Public endpoints never check the credential, so their responses are not marked: a public page that shows something based on `authenticationIdentifier` should set `Cache-Control: private` (or `no-store`) itself.
+
 ---
 
 ## Run the demo app
@@ -455,3 +521,6 @@ Then open: `http://localhost:4242`
 - Use fluent modifiers for styling and optional behavior.
 - Name bound variables used in forms (`.name("fieldName")`) so values are posted as expected.
 - Keep Bootstrap JS/CSS available if you use Bootstrap-dependent components (modal, offcanvas, dropdowns, etc.).
+- Pages render with `<!DOCTYPE html>` in standards mode, as Bootstrap 5 expects. Percentage heights need a parent with a definite height, and CSS lengths in raw styles need units (`.style("width: 300px")`, not `.style("width: 300")`).
+- Builder misuse (for example a `CardBody` outside a `Card`) never crashes the server. The part is still rendered after a `<template data-wsui-misuse>` comment, and a `[WSwiftUI] Builder misuse …` line is logged once per endpoint type.
+- State can be declared anywhere in `content()`, including before `webpage { }`.

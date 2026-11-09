@@ -35,3 +35,21 @@ public extension CoreWebEndpoint {
         return raw
     }
 }
+
+internal extension Array where Element == MenuEntry {
+
+    /// Sets `selected` on every entry whose `path` is one of `paths`, and on every entry that has
+    /// a selected descendant (so a primary is selected when one of its children is). Entries that
+    /// match nothing are set to false. Returns true when any entry in the array is selected.
+    @discardableResult
+    func markSelected(paths: [String]) -> Bool {
+        var any = false
+        for entry in self {
+            let childSelected = entry.children.markSelected(paths: paths)
+            let ownSelected = entry.path.map { paths.contains($0) } ?? false
+            entry.selected = ownSelected || childSelected
+            any = any || entry.selected
+        }
+        return any
+    }
+}

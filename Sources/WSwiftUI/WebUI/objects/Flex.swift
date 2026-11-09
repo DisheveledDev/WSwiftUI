@@ -125,9 +125,6 @@ public extension CoreWebEndpoint {
         flex.elementName = "div"
         flex.addAttribute(.class("d-flex"))
         flex.addAttribute(.class("wsui-flex"))
-        stack.append(flex)
-        content()
-        stack.removeAll(where: { $0.builderId == flex.builderId })
-        return flex
+        return withParent(flex, content)
     }
 }

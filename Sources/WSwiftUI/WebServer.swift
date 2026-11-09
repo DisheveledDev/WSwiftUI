@@ -1,8 +1,9 @@
 import Foundation
 import Dispatch
 
-// Token extraction (Bearer header, opt-in ?token=, auth cookie) lives in
-// security/SessionCookie.swift: HttpRequest.authenticationCredential(acceptQueryToken:).
+// Sessions: token extraction (Bearer header, opt-in ?token=, session cookie) and cookie writing
+// live in security/SessionCookie.swift; the per-request decision and the finalizer that applies it
+// to every response live in security/SessionLifecycle.swift; settings in security/SessionConfig.swift.
 
 public class WSwiftServer {
     
@@ -10,13 +11,30 @@ public class WSwiftServer {
     private var mutex: Mutex = Mutex()
     private var endpoints: [WebEndpoint] = []
     private let listenPort: Int
-    public var publicBaseURL: String?
+    public var publicBaseURL: String? {
+        didSet { publicBaseURLIsHTTPS = SessionCookie.declaresHTTPS(publicBaseURL) }
+    }
+
+    /// Whether `publicBaseURL` was given with an explicit `https://` scheme. Only that makes
+    /// `.auto` session cookies `Secure`: a value without a scheme is normalized to https for
+    /// canonical URLs, but may well be served over plain http.
+    private var publicBaseURLIsHTTPS: Bool = false
+
+    /// Session cookie settings: name, lifetime, sliding renewal, Secure and SameSite, and
+    /// `acceptQueryToken` (assigning a new value replaces one set through `acceptQueryToken`).
+    /// See `WebSessionConfig` for when a response sets, renews or clears the cookie.
+    public var session: WebSessionConfig = WebSessionConfig()
     
     /// When true, a `?token=` query parameter can authenticate a request (after a Bearer
     /// header, before the auth cookie). It is never written into the session cookie.
     /// Defaults to false: the query string is ignored for authentication, because a token
     /// in a link can be planted by someone else and leaks into logs and Referer headers.
-    public var acceptQueryToken: Bool = false
+    /// Same as `session.acceptQueryToken`: assigning `session` afterwards replaces it, so set
+    /// `session` first or pass `acceptQueryToken:` to `WebSessionConfig`.
+    public var acceptQueryToken: Bool {
+        get { session.acceptQueryToken }
+        set { session.acceptQueryToken = newValue }
+    }
     
     public func register(_ newEndpoint: WebEndpoint) {
         
@@ -28,30 +46,29 @@ public class WSwiftServer {
             endpoints.append( instance )
         }
         
-        let callback: ((HttpRequest) -> HttpResponse) = { [self] request in
+        // every response this returns is finalized by the route handler below, which applies the session cookie
+        let callback: ((HttpRequest, SessionRequestContext) -> HttpResponse) = { [self] request, sessionContext in
             
             let action = WebRequestActivity.from(request: request)
             var endpoint = newEndpoint.create()
             var grants: [String] = []
             
-            let credential = request.authenticationCredential(acceptQueryToken: self.acceptQueryToken)
+            let credential = sessionContext.credential
             endpoint.authenticationIdentifier = credential?.token
-            (endpoint as? CoreWebEndpoint)?.authenticationTokenSource = credential?.source ?? .none
+            (endpoint as? CoreWebEndpoint)?.sessionContext = sessionContext
             
             if endpoint.authenticationRequired.contains(.authenticated) {
                 let rejected = { () -> HttpResponse in
-                    let response = HttpResponse().redirect(to: "/")
-                    // a rejected ?token= says nothing about the auth cookie, so it must not clear it
-                    if credential?.source != .queryParameter {
-                        response.clearCookie(name: SessionCookie.name)
-                    }
-                    return response
+                    // the finalizer clears a rejected cookie token; a Bearer or ?token= credential never touches the cookie
+                    sessionContext.credentialRejected()
+                    return HttpResponse().redirect(to: "/")
                 }
                 if let token = credential?.token, let authenticator = self.getUserRoles, let currentGrants = authenticator(token, endpoint) {
                     grants = currentGrants
                     if grants.isEmpty {
                         return rejected()
                     }
+                    sessionContext.credentialAccepted()
                 } else {
                     return rejected()
                 }
@@ -111,9 +128,10 @@ public class WSwiftServer {
                         // we now need to check if we have permissions to see it
                         if e.authenticationRequired.contains(.authenticated) {
                             
-                            // cast the object into a cotent or api
+                            // cast the object into a cotent or api; a menu entry is a link, so it is shown
+                            // when the user may view the page, whatever the current request is doing
                             if let content = e as? WebContent {
-                                if let permissions = content.acceptedRoles(for: action) {
+                                if let permissions = content.acceptedRoles(for: .Content) {
                                     if permissions.isEmpty == false {
                                         // get the authenticated permissions/grants
                                         if grants.containsAny(permissions) == false {
@@ -183,6 +201,9 @@ public class WSwiftServer {
                         
                     }
                 }
+                
+                // mark the entry for the page being served, and its primary, as selected
+                menus.markSelected(paths: [request.head.path, path])
             }
             
             if let endpoint = endpoint as? CoreWebEndpoint {
@@ -215,9 +236,8 @@ public class WSwiftServer {
                     return HttpResponse().status(.notFound)
                 }
                 
-                // if we have a response, return it
+                // if we have a response, return it (the session cookie is added when it is finalized)
                 if let response = response as? HttpResponse {
-                    // check to see if there was a new auth token set
                     return response
                 } else if response is WebElement {
                     // build the html response from the response object
@@ -227,10 +247,10 @@ public class WSwiftServer {
                             endpoint.applyPageSEO(seoEndpoint.seo(), baseURL: self.resolvedBaseURL(for: request), path: endpointPath)
                         }
                         let pageContent = endpoint.renderWebPage()
-                        return SessionCookie.apply(to: HttpResponse().status(.ok).content(.html).body(pageContent), for: endpoint)
+                        return HttpResponse().status(.ok).content(.html).body(pageContent)
                     }
                 } else if let response = response as? Codable {
-                    return SessionCookie.apply(to: HttpResponse().status(.ok).content(.json).body(json: response), for: endpoint)
+                    return HttpResponse().status(.ok).content(.json).body(json: response)
                 }
                 
                 return HttpResponse().status(.notFound)
@@ -241,7 +261,15 @@ public class WSwiftServer {
             
         }
         
-        svr.addRoute(path, handler: callback)
+        svr.addRoute(path) { [self] request in
+            // without an onSessionEnded handler a logout only clears the browser's cookie: say so, once
+            let notice = self.sessionEndedNotice
+            let sessionContext = SessionRequestContext(request: request,
+                                                       config: self.session,
+                                                       publicBaseURLIsHTTPS: self.publicBaseURLIsHTTPS,
+                                                       onSessionEnded: self.sessionEnded ?? { _ in notice.log() })
+            return sessionContext.finalize(callback(request, sessionContext))
+        }
         print("Registered endpoint \(newEndpoint) at path \(path)")
         
         
@@ -528,6 +556,43 @@ public class WSwiftServer {
         getUserRoles = callback
     }
     
+    private var sessionEnded: ((String) -> Void)? = nil
+    
+    /// Called when an endpoint calls `deauthenticateSession()`, with the token that was in effect:
+    /// the one set earlier in the same request with `authenticateSession`, otherwise the request's
+    /// own token (cookie, Bearer or accepted `?token=`). The logout clears the session cookie, so when
+    /// the request's cookie holds a different token (a Bearer header or `?token=` took precedence over
+    /// it) the handler is called with that token too. It runs at most once per token per request,
+    /// however often `deauthenticateSession()` is called, and not at all when no token was in effect.
+    ///
+    /// The token has not necessarily been validated: on a public endpoint (a typical `/logout`)
+    /// `onGetUserRoles` doesn't run, so it is whatever the request carried. Treat it as a key to
+    /// delete, not as proof of identity.
+    ///
+    /// Revoke the token server-side here; a reliable logout needs it:
+    ///
+    ///     server.onSessionEnded { token in Database.removeUserToken(token: token) }
+    ///
+    /// Clearing the cookie only affects the browser that receives the logout response. Sessions are
+    /// stateless, so a request still carrying the old cookie (an XHR in flight, another tab, a copied
+    /// cookie) that reaches an `[.authenticated]` endpoint is accepted and renewed until
+    /// `onGetUserRoles` rejects the token. Without a handler the server logs a warning the first
+    /// time a session with a token ends.
+    ///
+    /// It runs synchronously on the request's thread, inside `deauthenticateSession()`, before the
+    /// response is sent. It is not called when a token is merely rejected by `onGetUserRoles`.
+    public func onSessionEnded(callback: @escaping ((_ token: String) -> Void)) {
+        sessionEnded = callback
+    }
+
+    /// Logged the first time `deauthenticateSession()` ends a token while no `onSessionEnded`
+    /// handler is registered.
+    internal let sessionEndedNotice = SessionNotice(
+        "[WSwiftUI] deauthenticateSession() cleared the session cookie, but no onSessionEnded handler is registered: "
+        + "the token stays valid server-side, so a copied cookie or a request already in flight can still use it. "
+        + "Revoke it with server.onSessionEnded { token in ... }."
+    )
+    
     // request events
     private var onAccept: ((_ endpoint: WebEndpoint) -> Void)? = nil
     
@@ -557,7 +622,9 @@ public class WSwiftServer {
     internal init(port: Int, bindAddressv4: String?, publicBaseURL: String?, autoStart: Bool) {
         self.listenPort = port
         self.publicBaseURL = Self.normalizedBaseURL(publicBaseURL)
-        
+        // observers do not run in init; decide from the value as given, before normalization
+        self.publicBaseURLIsHTTPS = SessionCookie.declaresHTTPS(publicBaseURL)
+
         var config = HTTPServer.Config()
         config.port = UInt16(port)
 
@@ -583,10 +650,13 @@ public class WSwiftServer {
     
 }
 
+/// One entry of the menu built for each request (`CoreWebEndpoint.menuEntries`). Entries are
+/// listed when the user may view the page (its `.Content` roles), whatever the current request does.
 public class MenuEntry {
     
     public var title: String = ""
     public var children: [MenuEntry] = []
+    /// True for the entry of the page being served, and for the primary entry that contains it.
     public var selected: Bool = false
     public var path: String?
     public var header: Bool = false

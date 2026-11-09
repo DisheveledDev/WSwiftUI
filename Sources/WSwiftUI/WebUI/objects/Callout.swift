@@ -9,7 +9,8 @@ import Foundation
 
 public extension CoreWebEndpoint {
     
-    /// Main Picker container (dropdown)
+    /// A padded box with a 4px leading border in the colour of `type` and a light grey border on the other
+    /// sides; `content` goes inside it.
     @discardableResult
     func Callout(_ type: BootstrapVariant, _ content: WebComposerClosure)
     -> WebElement {
@@ -23,14 +24,8 @@ public extension CoreWebEndpoint {
             el.border(.bottom, .lightgrey, width: 1)
             el.border(.trailing, .lightgrey, width: 1)
         }
-        stack.append(callout)
         // items go here
-        content()
-        // pop menu and picker
-        stack.removeAll(where: { $0.builderId == callout.builderId })
-        
-        return callout
-        
+        return withParent(callout, content)
     }
     
 }

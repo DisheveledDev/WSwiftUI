@@ -173,9 +173,12 @@ public struct ChartOptions {
 public class WebChartElement: WebElement {}
 
 /// Encodes a value as a JSON literal for the chart's `<script>`. The output is script-safe (see
-/// `ScriptValue.json`), so labels/titles can't close the script element or break the literal.
+/// `ScriptValue.json`), so labels/titles can't close the script element or break the literal. Keys are
+/// sorted: JSONEncoder's own key order changes from one encoding to the next, so the same chart rendered a
+/// different page each time.
 private func encodeJSON<T: Encodable>(_ value: T) -> String {
     let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
     guard let data = try? encoder.encode(value),
           let json = String(data: data, encoding: .utf8) else {
         return "null"

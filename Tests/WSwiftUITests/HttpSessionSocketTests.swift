@@ -277,7 +277,7 @@ struct HttpSessionSocketTests {
         let response = try HttpSessionSocket.get("/session-probe?token=\(HttpSessionHelpers.crlfToken)", port: port)
         #expect(response.statusCode == 200)
         #expect(response.values("X-Injected").isEmpty)
-        #expect(response.values("Set-Cookie") == [HttpSessionHelpers.anonymousCookie])
+        #expect(response.values("Set-Cookie").isEmpty)
         #expect(response.values("Content-Length") == ["\(response.body.count)"])
     }
 
@@ -294,7 +294,7 @@ struct HttpSessionSocketTests {
         let response = try HttpSessionSocket.get("/session-probe?name=caf%C3%A9&x=%2F..%2F", port: port,
                                                  extraHeaders: "Cookie: auth=tok-123\r\n")
         #expect(response.statusCode == 200)
-        #expect(response.values("Set-Cookie") == [HttpSessionHelpers.cookie("tok-123")])
+        #expect(response.values("Set-Cookie").isEmpty) // a public page neither renews nor clears the cookie
         #expect(response.values("Content-Length") == ["\(response.body.count)"])
         #expect(response.body.isEmpty == false)
     }

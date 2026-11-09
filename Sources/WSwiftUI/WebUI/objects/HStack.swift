@@ -38,10 +38,7 @@ public extension CoreWebEndpoint {
             }
             element.layout = .horizontal
         }
-        stack.append(object)
-        closure()
-        stack.removeAll(where: { $0.builderId == object.builderId })
-        return object
+        return withParent(object, closure)
     }
     
 }

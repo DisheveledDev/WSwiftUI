@@ -131,52 +131,49 @@ public extension CoreWebEndpoint {
         carousel.wrap(wrap)
         carousel.keyboard(keyboard)
         carousel.fade(fade)
-        stack.append(carousel)
-        content()
-        stack.removeAll(where: { $0.builderId == carousel.builderId })
-        return carousel
+        return withParent(carousel, content)
     }
+
+    // The parts below must sit inside the part named in their message. Wrapper elements in between are
+    // allowed. Anywhere else the mistake is logged, an HTML comment marks the spot and the part is
+    // rendered where it was declared.
+
     /// Carousel inner wrapper
     @discardableResult
     func CarouselInner(_ content: WebComposerClosure) -> WebCarouselInnerElement {
-        guard let _ = stack.last as? WebCarouselElement else {
-            fatalError("CarouselInner must be inside Carousel { ... } block")
-        }
+        requireStructuralParent({ $0 is WebCarouselElement }, among: isCarouselPart,
+                                "CarouselInner must be inside Carousel { ... } block")
         let inner = WebCarouselInnerElement()
         populateCreatedObject(inner)
         inner.elementName = "div"
         inner.nameInner()
-        stack.append(inner)
-        content()
-        stack.removeAll(where: { $0.builderId == inner.builderId })
-        return inner
+        return withParent(inner, content)
     }
     /// Individual carousel item
     @discardableResult
     func CarouselItem(active: Bool = false,
                       interval: Int? = nil,
                       _ content: WebComposerClosure) -> WebCarouselItemElement {
-        guard let _ = stack.last as? WebCarouselInnerElement else {
-            fatalError("CarouselItem must be inside CarouselInner { ... } block")
-        }
+        requireStructuralParent({ $0 is WebCarouselInnerElement }, among: isCarouselPart,
+                                "CarouselItem must be inside CarouselInner { ... } block")
         let item = WebCarouselItemElement()
         populateCreatedObject(item)
         item.elementName = "div"
         item.addAttribute(.class("carousel-item"))
         item.active(active)
         if let iv = interval { item.interval(iv) }
-        stack.append(item)
-        content()
-        stack.removeAll(where: { $0.builderId == item.builderId })
-        return item
+        return withParent(item, content)
     }
     /// Carousel indicators container
     @discardableResult
     func CarouselIndicators(id: String,
                              count: Int,
                              activeIndex: Int = 0) -> WebCarouselIndicatorContainerElement {
-        guard let _ = stack.last as? WebCarouselElement else {
-            fatalError("CarouselIndicators must be inside Carousel { ... } block")
+        requireStructuralParent({ $0 is WebCarouselElement }, among: isCarouselPart,
+                                "CarouselIndicators must be inside Carousel { ... } block")
+        if count < 0 {
+            // `0..<count` traps on a negative count; render no indicators instead.
+            misuse("CarouselIndicators count must not be negative (got \(count)); no indicators are rendered")
         }
         let container = WebCarouselIndicatorContainerElement()
         populateCreatedObject(container)
@@ -184,7 +181,7 @@ public extension CoreWebEndpoint {
         container.addAttribute(.class("carousel-indicators"))
         // Build innerHTML for indicators
         var html = ""
-        for idx in 0..<count {
+        for idx in 0..<Swift.max(count, 0) {
             var classes = ""
             var ariaCurrent = ""
             if idx == activeIndex {
@@ -199,9 +196,8 @@ public extension CoreWebEndpoint {
     /// Previous control
     @discardableResult
     func CarouselControlPrev(id: String, label: String? = nil) -> WebCarouselControlElement {
-        guard let _ = stack.last as? WebCarouselElement else {
-            fatalError("CarouselControlPrev must be inside Carousel { ... } block")
-        }
+        requireStructuralParent({ $0 is WebCarouselElement }, among: isCarouselPart,
+                                "CarouselControlPrev must be inside Carousel { ... } block")
         let ctrl = WebCarouselControlElement()
         populateCreatedObject(ctrl)
         ctrl.elementName = "a"
@@ -217,9 +213,8 @@ public extension CoreWebEndpoint {
     /// Next control
     @discardableResult
     func CarouselControlNext(id: String, label: String? = nil) -> WebCarouselControlElement {
-        guard let _ = stack.last as? WebCarouselElement else {
-            fatalError("CarouselControlNext must be inside Carousel { ... } block")
-        }
+        requireStructuralParent({ $0 is WebCarouselElement }, among: isCarouselPart,
+                                "CarouselControlNext must be inside Carousel { ... } block")
         let ctrl = WebCarouselControlElement()
         populateCreatedObject(ctrl)
         ctrl.elementName = "a"
@@ -231,5 +226,12 @@ public extension CoreWebEndpoint {
 """))
         return ctrl
     }
+}
+
+/// The elements that make up a carousel's structure. Anything else on the builder stack is a wrapper.
+fileprivate func isCarouselPart(_ element: WebElement) -> Bool {
+    return element is WebCarouselElement
+        || element is WebCarouselInnerElement
+        || element is WebCarouselItemElement
 }
 

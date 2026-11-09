@@ -37,10 +37,11 @@ public extension WebCardElement {
         return self
     }
 
-    /// Aligns text inside the card ('start', 'center', 'end')
+    /// Aligns text inside the card: 'start' (or 'left'), 'center', 'end' (or 'right'), 'justify'.
+    /// 'left'/'right' map to Bootstrap 5's `text-start`/`text-end`; other values pass through as `text-<value>`.
     @discardableResult
     func textAlign(_ alignment: String) -> Self {
-        addAttribute(.class("text-\(alignment)"))
+        applyTextAlignment(alignment)
         return self
     }
 }
@@ -106,60 +107,46 @@ public extension CoreWebEndpoint {
             el.class("card")
             el.class("wsui-card")
         }
-        // allow additional modifiers like .bordered(), .shadow()
-        card.default()
-        stack.append(card)
-        content()
-        stack.removeAll(where: { $0.builderId == card.builderId })
-        return card
+        // (`.bordered()`, `.shadow()` and the other modifiers can be applied to the result)
+        return withParent(card, content)
     }
 
-    /// Builds a `<div class="card-header">…</div>`; must be inside a Card
+    /// Builds a `<div class="card-header">…</div>`; must be inside a Card (wrapper elements in between are
+    /// allowed). Anywhere else the mistake is logged, an HTML comment marks the spot and the header is
+    /// rendered where it was declared.
     @discardableResult
     func CardHeader(_ content: WebComposerClosure) -> WebCardHeaderElement {
-        guard let _ = stack.last as? WebCardElement else {
-            fatalError("CardHeader must be used inside a Card { ... } block")
-        }
+        requireStructuralParent({ $0 is WebCardElement }, among: isCardPart,
+                                "CardHeader must be used inside a Card { ... } block")
         let header = createCardHeader { el in
             el.elementName = "div"
             el.class("card-header")
         }
-        stack.append(header)
-        content()
-        stack.removeAll(where: { $0.builderId == header.builderId })
-        return header
+        return withParent(header, content)
     }
 
-    /// Builds a `<div class="card-body">…</div>`; must be inside a Card
+    /// Builds a `<div class="card-body">…</div>`; must be inside a Card (see `CardHeader`)
     @discardableResult
     func CardBody(_ content: WebComposerClosure) -> WebCardBodyElement {
-        guard let _ = stack.last as? WebCardElement else {
-            fatalError("CardBody must be used inside a Card { ... } block")
-        }
+        requireStructuralParent({ $0 is WebCardElement }, among: isCardPart,
+                                "CardBody must be used inside a Card { ... } block")
         let body = createCardBody { el in
             el.elementName = "div"
             el.class("card-body")
         }
-        stack.append(body)
-        content()
-        stack.removeAll(where: { $0.builderId == body.builderId })
-        return body
+        return withParent(body, content)
     }
 
-    /// Builds a `<div class="card-footer">…</div>`; must be inside a Card
+    /// Builds a `<div class="card-footer">…</div>`; must be inside a Card (see `CardHeader`)
     @discardableResult
     func CardFooter(_ content: WebComposerClosure) -> WebCardFooterElement {
-        guard let _ = stack.last as? WebCardElement else {
-            fatalError("CardFooter must be used inside a Card { ... } block")
-        }
+        requireStructuralParent({ $0 is WebCardElement }, among: isCardPart,
+                                "CardFooter must be used inside a Card { ... } block")
         let footer = createCardFooter { el in
             el.elementName = "div"
             el.class("card-footer")
         }
-        stack.append(footer)
-        content()
-        stack.removeAll(where: { $0.builderId == footer.builderId })
-        return footer
+        return withParent(footer, content)
     }
 
     /// Builds an image with class="card-img-top"; can be chained with .responsive(), .rounded()
@@ -185,4 +172,12 @@ public extension CoreWebEndpoint {
         }
         return img
     }
+}
+
+/// The elements that make up a card's structure. Anything else on the builder stack is a wrapper.
+fileprivate func isCardPart(_ element: WebElement) -> Bool {
+    return element is WebCardElement
+        || element is WebCardHeaderElement
+        || element is WebCardBodyElement
+        || element is WebCardFooterElement
 }

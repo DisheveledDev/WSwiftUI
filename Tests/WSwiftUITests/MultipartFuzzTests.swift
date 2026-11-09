@@ -203,7 +203,8 @@ struct MultipartFuzzTests {
         #expect(data.string("name") == "Ada Lovelace")
         #expect(data.int("n") == 42)
         #expect(data.bool("flag") == true)
-        #expect(data.exists("empty") == false)
+        // an empty value is an empty field (as multipart has always reported it), not a missing one
+        #expect(data.string("empty") == "")
         #expect(data.string("bad") == "%ZZ")
     }
 

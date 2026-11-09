@@ -175,6 +175,16 @@ public enum WebCornerPosition : String {
     case topRight = "TopRight"
     case bottomLeft = "BottomLeft"
     case bottomRight = "BottomRight"
+    
+    /// The CSS property that rounds this corner.
+    var cssRadiusProperty: String {
+        switch self {
+        case .topLeft:     return "border-top-left-radius"
+        case .topRight:    return "border-top-right-radius"
+        case .bottomLeft:  return "border-bottom-left-radius"
+        case .bottomRight: return "border-bottom-right-radius"
+        }
+    }
 }
 
 public enum WebFontSize {
@@ -600,10 +610,13 @@ public enum WebPositionValue {
         }
     }
     
+    /// The suffix of the Bootstrap position utility for this value (`top-0`, `start-50`, `end-100`, ...), or
+    /// `nil` when Bootstrap has no such class and the value is emitted as an inline style instead.
+    /// Bootstrap 5 only defines 0, 50 and 100 (percent); there is no `top-auto`.
     var bootstrapClassSuffix: String? {
         switch self {
         case .auto:
-            return "auto"
+            return nil
         case .pixels:
             return nil
         case .percent(let value):
@@ -639,6 +652,24 @@ fileprivate func bootstrapSpacingStep(for pixels: Int) -> Int? {
     case 48: return 5
     default: return nil
     }
+}
+
+/// `value` as a double-quoted CSS string: `"` and the backslash are backslash-escaped and control
+/// characters become CSS hex escapes (a newline becomes `\a `), so the value can't end the string early.
+fileprivate func cssQuotedString(_ value: String) -> String {
+    var out = "\""
+    for scalar in value.unicodeScalars {
+        if scalar == "\"" || scalar == "\\" {
+            out.append("\\")
+            out.unicodeScalars.append(scalar)
+        } else if scalar.value < 0x20 || scalar.value == 0x7F {
+            out.append("\\" + String(scalar.value, radix: 16) + " ")
+        } else {
+            out.unicodeScalars.append(scalar)
+        }
+    }
+    out.append("\"")
+    return out
 }
 
 fileprivate func bootstrapSpacingClassPrefix(_ property: String, position: WebAreaPosition) -> String {
@@ -711,23 +742,16 @@ public extension WebElement {
         if let maxHeight { _ = self.maxHeight(maxHeight) }
         
         if let alignment {
-            switch alignment {
-                case .leading:
-                    addAttribute(.class("align-self-start"))
-                    addAttribute(.class("me-auto"))
-                case .center:
-                    addAttribute(.class("align-self-center"))
-                    addAttribute(.class("mx-auto"))
-                case .trailing:
-                    addAttribute(.class("align-self-end"))
-                    addAttribute(.class("ms-auto"))
-            }
+            applyFrameAlignment(alignment)
         }
         
         return self
     }
     
     /// SwiftUI-like convenience for stretching on one or both axes.
+    ///
+    /// Note: a call with only `alignment:` (`.frame(alignment: .center)`) resolves to this overload; it
+    /// adds the same alignment classes as `frame(width:...alignment:)`.
     @discardableResult
     func frame(fillWidth: Bool = false,
                fillHeight: Bool = false,
@@ -739,9 +763,27 @@ public extension WebElement {
             addAttribute(.class("h-100"))
         }
         if let alignment {
-            _ = frame(alignment: alignment)
+            // Not `frame(alignment:)`: that call resolves back to this overload and recursed forever.
+            applyFrameAlignment(alignment)
         }
         return self
+    }
+    
+    /// The alignment classes shared by both `frame` overloads: the element aligns itself on the cross axis
+    /// of a flex parent (`align-self-*`) and takes the free space on the other side (`me-auto`, `mx-auto`,
+    /// `ms-auto`).
+    private func applyFrameAlignment(_ alignment: WebFrameAlignment) {
+        switch alignment {
+            case .leading:
+                addAttribute(.class("align-self-start"))
+                addAttribute(.class("me-auto"))
+            case .center:
+                addAttribute(.class("align-self-center"))
+                addAttribute(.class("mx-auto"))
+            case .trailing:
+                addAttribute(.class("align-self-end"))
+                addAttribute(.class("ms-auto"))
+        }
     }
     
     
@@ -895,11 +937,10 @@ public extension WebElement {
         return self
     }
     
+    /// Rounds one corner, e.g. `radius(.topLeft, 8)` gives `border-top-left-radius: 8px`.
     @discardableResult
     func radius(_ position: WebCornerPosition, _ radius: Int) -> Self {
-        // e.g. position.rawValue == "TopLeft" → border-top-left-radius
-        let cssProp = "border-\(position.rawValue.lowercased().insertDashes())-radius"
-        addAttribute(.style("\(cssProp): \(radius)px"))
+        addAttribute(.style("\(position.cssRadiusProperty): \(radius)px"))
         return self
     }
     
@@ -971,6 +1012,25 @@ public extension WebElement {
         return self
     }
     
+    /// Text alignment from a string, for the string-based `align(_:)` / `textAlign(_:)` modifiers on
+    /// table cells and cards: "left"/"start", "right"/"end", "center" and "justify" (any case) map like
+    /// `textalign(_:)` to Bootstrap 5 classes (`text-start`, `text-end`, `text-center`) or
+    /// `text-align: justify`. Any other value is passed through as the class `text-<value>`.
+    internal func applyTextAlignment(_ value: String) {
+        switch value.trimmingCharacters(in: .whitespaces).lowercased() {
+        case "left", "start":
+            addAttribute(.class("text-start"))
+        case "right", "end":
+            addAttribute(.class("text-end"))
+        case "center":
+            addAttribute(.class("text-center"))
+        case "justify":
+            addAttribute(.style("text-align: justify"))
+        default:
+            addAttribute(.class("text-\(value)"))
+        }
+    }
+    
     @discardableResult
     func wrap(_ type: WebTextWrapType) -> Self {
         switch type {
@@ -987,6 +1047,17 @@ public extension WebElement {
     @discardableResult
     func clip() -> Self {
         addAttribute(.class("overflow-hidden"))
+        return self
+    }
+    
+    /// Hides the element from sighted users but keeps it for screen readers (Bootstrap `visually-hidden`),
+    /// for labels and hints that only assistive technology should announce. This is what `hidden(true)`
+    /// did before it switched to `display: none`. `false` adds nothing.
+    @discardableResult
+    func visuallyHidden(_ on: Bool = true) -> Self {
+        if on {
+            addAttribute(.class("visually-hidden"))
+        }
         return self
     }
     
@@ -1132,16 +1203,22 @@ public extension WebElement {
     
     // MARK: – Background Utilities
     
+    /// A linear gradient through `colors`. CSS needs at least two colour stops, so a single colour is
+    /// repeated (a solid fill) and an empty list adds nothing.
     @discardableResult
     func background(_ dir: WebGradientDirection, _ colors: [WebColor]) -> Self {
-        let stops = colors.map(\.rgba).joined(separator: ",")
+        guard let first = colors.first else { return self }
+        let stopColors = colors.count == 1 ? [first, first] : colors
+        let stops = stopColors.map(\.rgba).joined(separator: ",")
         addAttribute(.style("background-image: linear-gradient(\(dir.rawValue),\(stops))"))
         return self
     }
     
+    /// Sets `background-image: url("<url>")`. The URL is written as a quoted CSS string, so URLs with
+    /// spaces, quotes or parentheses stay one valid value.
     @discardableResult
     func backgroundImage(_ url: String) -> Self {
-        addAttribute(.style("background-image: url(\(url))"))
+        addAttribute(.style("background-image: url(\(cssQuotedString(url)))"))
         return self
     }
     

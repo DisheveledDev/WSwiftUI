@@ -41,76 +41,70 @@ public extension CoreWebEndpoint {
     let nav = WebNavBarElement()
     populateCreatedObject(nav)
     nav.elementName = "nav"
+    // Bootstrap 5.3 navbars are light by default and it defines no `navbar-light` (which used to be added
+    // here and styled nothing), only the deprecated but working `navbar-dark`.
+    let scheme = color == .dark ? " navbar-dark" : ""
     nav.addAttribute(.class(
-      "navbar navbar-expand-\(expand.rawValue) navbar-\(color.rawValue) bg-\(bg.rawValue)"
+      "navbar navbar-expand-\(expand.rawValue)\(scheme) bg-\(bg.rawValue)"
     ))
     nav.addAttribute(.class("wsui-navbar"))
 
-    // Push nav so all children get appended to it
-    stack.append(nav)
+    // Open nav so all children get appended to it. Each container below is opened with `withParent`, so
+    // the builder stack is back at its own depth when NavBar returns, whatever the content did.
+    return withParent(nav) {
+      // 2) <div class="container[-fluid]">
+      let container = WebElement()
+      populateCreatedObject(container)
+      container.elementName = "div"
+      if useFluidContainer {
+        container.addAttribute(.class("container-fluid"))
+      } else {
+        container.deviceClass(mobile: "container-fluid", desktop: "container")
+      }
 
-    // 2) <div class="container[-fluid]">
-    let container = WebElement()
-    populateCreatedObject(container)
-    container.elementName = "div"
-    if useFluidContainer {
-      container.addAttribute(.class("container-fluid"))
-    } else {
-      container.deviceClass(mobile: "container-fluid", desktop: "container")
+      withParent(container) {
+        // 3) Brand link
+        let brandEl = WebNavBarBrandElement()
+        populateCreatedObject(brandEl)
+        brandEl.elementName = "a"
+        brandEl.addAttribute(.class("navbar-brand"))
+        brandEl.addAttribute(.pair("href", href))
+        brandEl.innerHTML(brand)   // trusted HTML by design (see doc comment)
+        // (not opened: the brand is a leaf)
+
+        // 4) Toggler
+        let collapseId = "navbarCollapse_\(nav.builderId)"
+        let toggler = WebNavBarTogglerElement()
+        populateCreatedObject(toggler)
+        toggler.elementName = "button"
+        toggler.addAttribute(.class("navbar-toggler"))
+        toggler.addAttribute(.pair("type", "button"))
+        toggler.addAttribute(.pair("data-bs-toggle", "collapse"))
+        toggler.addAttribute(.pair("data-bs-target", "#\(collapseId)"))
+        toggler.addAttribute(.pair("aria-controls", collapseId))
+        toggler.addAttribute(.pair("aria-expanded", "false"))
+        toggler.addAttribute(.pair("aria-label", "Toggle navigation"))
+        toggler.innerHTML("<span class=\"navbar-toggler-icon\"></span>")
+
+        // 5) Collapse wrapper
+        let collapse = WebNavBarCollapseElement()
+        populateCreatedObject(collapse)
+        collapse.elementName = "div"
+        collapse.addAttribute(.class("collapse navbar-collapse"))
+        collapse.addAttribute(.pair("id", collapseId))
+
+        withParent(collapse) {
+          // 6) Nav‐list <ul>
+          let navList = WebElement()
+          populateCreatedObject(navList)
+          navList.elementName = "ul"
+          navList.addAttribute(.class("navbar-nav ms-auto mb-2 mb-lg-0"))
+
+          // 7) your items go here
+          withParent(navList, content)
+        }
+      }
     }
-    // push container
-    stack.append(container)
-
-    // 3) Brand link
-    let brandEl = WebNavBarBrandElement()
-    populateCreatedObject(brandEl)
-    brandEl.elementName = "a"
-    brandEl.addAttribute(.class("navbar-brand"))
-    brandEl.addAttribute(.pair("href", href))
-    brandEl.innerHTML(brand)   // trusted HTML by design (see doc comment)
-    // (no push—brand is leaf)
-
-    // 4) Toggler
-    let collapseId = "navbarCollapse_\(nav.builderId)"
-    let toggler = WebNavBarTogglerElement()
-    populateCreatedObject(toggler)
-    toggler.elementName = "button"
-    toggler.addAttribute(.class("navbar-toggler"))
-    toggler.addAttribute(.pair("type", "button"))
-    toggler.addAttribute(.pair("data-bs-toggle", "collapse"))
-    toggler.addAttribute(.pair("data-bs-target", "#\(collapseId)"))
-    toggler.addAttribute(.pair("aria-controls", collapseId))
-    toggler.addAttribute(.pair("aria-expanded", "false"))
-    toggler.addAttribute(.pair("aria-label", "Toggle navigation"))
-    toggler.innerHTML("<span class=\"navbar-toggler-icon\"></span>")
-
-    // 5) Collapse wrapper
-    let collapse = WebNavBarCollapseElement()
-    populateCreatedObject(collapse)
-    collapse.elementName = "div"
-    collapse.addAttribute(.class("collapse navbar-collapse"))
-    collapse.addAttribute(.pair("id", collapseId))
-    // push collapse
-    stack.append(collapse)
-
-    // 6) Nav‐list <ul>
-    let navList = WebElement()
-    populateCreatedObject(navList)
-    navList.elementName = "ul"
-    navList.addAttribute(.class("navbar-nav ms-auto mb-2 mb-lg-0"))
-    // push navList—your items go here
-    stack.append(navList)
-
-    // 7) Invoke user content closure
-    content()
-
-    // 8) Pop navList, collapse, container, nav
-    stack.removeLast()  // navList
-    stack.removeLast()  // collapse
-    stack.removeLast()  // container
-    stack.removeLast()  // nav
-
-    return nav
   }
 
   @discardableResult
@@ -125,27 +119,26 @@ public extension CoreWebEndpoint {
     li.elementName = "li"
     li.addAttribute(.class("nav-item"))
 
-    stack.append(li)
-
-    let a = WebElement()
-    populateCreatedObject(a)
-    a.elementName = "a"
-    var cls = "nav-link"
-    if active { cls += " active"; a.addAttribute(.pair("aria-current", "page")) }
-    if disabled { cls += " disabled"; a.addAttribute(.pair("aria-disabled", "true")) }
-    a.addAttribute(.class(cls))
-    a.addAttribute(.pair("href", href))
-    a.innerHTML(WebEscape.html(title))
-
-    stack.removeAll(where: { $0.builderId == li.builderId })
-
-    return li
+    return withParent(li) {
+      let a = WebElement()
+      populateCreatedObject(a)
+      a.elementName = "a"
+      var cls = "nav-link"
+      if active { cls += " active"; a.addAttribute(.pair("aria-current", "page")) }
+      if disabled { cls += " disabled"; a.addAttribute(.pair("aria-disabled", "true")) }
+      a.addAttribute(.class(cls))
+      a.addAttribute(.pair("href", href))
+      a.innerHTML(WebEscape.html(title))
+    }
   }
 
+  /// A dropdown in the navbar. `active` marks the toggle as the current section (pass the primary
+  /// `MenuEntry.selected`, which is true when the current page is the entry or one of its children).
   @discardableResult
   func NavDropdown(
     title: String,
     id: String,
+    active: Bool = false,
     disabled: Bool = false,
     _ content: WebComposerClosure
   ) -> WebNavBarDropdownElement {
@@ -154,60 +147,55 @@ public extension CoreWebEndpoint {
     li.elementName = "li"
     li.addAttribute(.class("nav-item dropdown"))
 
-    stack.append(li)
+    return withParent(li) {
+      let toggle = WebElement()
+      populateCreatedObject(toggle)
+      toggle.elementName = "a"
+      var cls = "nav-link dropdown-toggle"
+      if active { cls += " active" }
+      if disabled { cls += " disabled" }
+      toggle.addAttribute(.class(cls))
+      toggle.addAttribute(.pair("href", "#"))
+      toggle.addAttribute(.pair("id", id))
+      toggle.addAttribute(.pair("role", "button"))
+      toggle.addAttribute(.pair("data-bs-toggle", "dropdown"))
+      toggle.addAttribute(.pair("aria-expanded", "false"))
+      toggle.innerHTML(WebEscape.html(title))
 
-    let toggle = WebElement()
-    populateCreatedObject(toggle)
-    toggle.elementName = "a"
-    var cls = "nav-link dropdown-toggle"
-    if disabled { cls += " disabled" }
-    toggle.addAttribute(.class(cls))
-    toggle.addAttribute(.pair("href", "#"))
-    toggle.addAttribute(.pair("id", id))
-    toggle.addAttribute(.pair("role", "button"))
-    toggle.addAttribute(.pair("data-bs-toggle", "dropdown"))
-    toggle.addAttribute(.pair("aria-expanded", "false"))
-    toggle.innerHTML(WebEscape.html(title))
+      let menu = WebNavBarDropdownMenuElement()
+      populateCreatedObject(menu)
+      menu.elementName = "ul"
+      menu.addAttribute(.class("dropdown-menu"))
+      menu.addAttribute(.pair("aria-labelledby", id))
 
-    let menu = WebNavBarDropdownMenuElement()
-    populateCreatedObject(menu)
-    menu.elementName = "ul"
-    menu.addAttribute(.class("dropdown-menu"))
-    menu.addAttribute(.pair("aria-labelledby", id))
-
-    // push menu <ul> for its items
-    stack.append(menu)
-    content()
-    stack.removeAll(where: { $0.builderId == menu.builderId })
-    stack.removeAll(where: { $0.builderId == li.builderId })
-
-    return li
+      // open the menu <ul> for its items
+      withParent(menu, content)
+    }
   }
 
+  /// An item of a `NavDropdown`. `active` marks it as the current page (pass `MenuEntry.selected`).
   @discardableResult
   func NavDropdownItem(
     title: String,
     href: String,
+    active: Bool = false,
     disabled: Bool = false
   ) -> WebNavBarDropdownMenuItemElement {
     let li = WebNavBarDropdownMenuItemElement()
     populateCreatedObject(li)
     li.elementName = "li"
 
-    stack.append(li)
-
-    let a = WebElement()
-    populateCreatedObject(a)
-    a.elementName = "a"
-    var cls = "dropdown-item"
-    if disabled { cls += " disabled"; a.addAttribute(.pair("aria-disabled", "true")) }
-    a.addAttribute(.class(cls))
-    a.addAttribute(.pair("href", href))
-    a.innerHTML(WebEscape.html(title))
-
-    stack.removeAll(where: { $0.builderId == li.builderId })
-
-    return li
+    return withParent(li) {
+      let a = WebElement()
+      populateCreatedObject(a)
+      a.elementName = "a"
+      var cls = "dropdown-item"
+      if active { cls += " active"; a.addAttribute(.pair("aria-current", "page")) }
+      if disabled { cls += " disabled"; a.addAttribute(.pair("aria-disabled", "true")) }
+      a.addAttribute(.class(cls))
+      a.addAttribute(.pair("href", href))
+      a.innerHTML(WebEscape.html(title))
+    }
   }
 }
 

@@ -76,11 +76,12 @@ public extension CoreWebEndpoint {
         progress.elementName = "div"
         progress.addAttribute(.class("progress"))
         progress.addAttribute(.class("wsui-progress"))
-        stack.append(progress)
-        content()
-        stack.removeAll(where: { $0.builderId == progress.builderId })
-        return progress
+        return withParent(progress, content)
     }
+
+    // Every ProgressBar must sit inside a Progress { ... } (wrapper elements in between are allowed).
+    // Anywhere else the mistake is logged, an HTML comment marks the spot and the bar is rendered where it
+    // was declared.
 
     /// Static progress bar with given value
     @discardableResult
@@ -89,9 +90,8 @@ public extension CoreWebEndpoint {
                      variant: BootstrapVariant? = nil,
                      striped: Bool = false,
                      animated: Bool = false) -> WebProgressBarElement {
-        guard let _ = stack.last as? WebProgressElement else {
-            fatalError("ProgressBar must be used inside Progress { ... } block")
-        }
+        requireStructuralParent({ $0 is WebProgressElement }, among: { $0 is WebProgressElement },
+                                "ProgressBar must be used inside Progress { ... } block")
         let bar = WebProgressBarElement()
         populateCreatedObject(bar)
         bar.elementName = "div"
@@ -116,9 +116,8 @@ public extension CoreWebEndpoint {
                      variant: BootstrapVariant? = nil,
                      striped: Bool = false,
                      animated: Bool = false) -> WebProgressBarElement {
-        guard let _ = stack.last as? WebProgressElement else {
-            fatalError("Bound ProgressBar must be inside Progress { ... } block")
-        }
+        requireStructuralParent({ $0 is WebProgressElement }, among: { $0 is WebProgressElement },
+                                "Bound ProgressBar must be inside Progress { ... } block")
         // create bar
         let bar = WebProgressBarElement()
         populateCreatedObject(bar)
@@ -166,9 +165,8 @@ addCallback\(variable.builderId)(updateVariable\(bar.builderId));
                      variant: BootstrapVariant? = nil,
                      striped: Bool = false,
                      animated: Bool = false) -> WebProgressBarElement {
-        guard let _ = stack.last as? WebProgressElement else {
-            fatalError("Bound ProgressBar must be inside Progress { ... } block")
-        }
+        requireStructuralParent({ $0 is WebProgressElement }, among: { $0 is WebProgressElement },
+                                "Bound ProgressBar must be inside Progress { ... } block")
         let bar = WebProgressBarElement()
         populateCreatedObject(bar)
         bar.elementName = "div"
@@ -176,14 +174,17 @@ addCallback\(variable.builderId)(updateVariable\(bar.builderId));
         bar.addAttribute(.pair("role", "progressbar"))
         let barId = "progressBar_\(bar.builderId)"
         bar.id(barId)
-        // initial width from variable
-        let maxValue = max > 0 ? max : 1
-        let initial = variable.asDouble()
+        // initial width from variable. NaN and infinity can't be drawn and would trap the Int conversions
+        // (a Double parsed from user input can be either): a max that isn't a positive finite number
+        // becomes 1, and a value that isn't finite becomes 0.
+        let maxValue = (max.isFinite && max > 0) ? max : 1
+        let rawInitial = variable.asDouble()
+        let initial = rawInitial.isFinite ? rawInitial : 0
         let clampedInitial = Swift.min(Swift.max(initial, 0), maxValue)
         let initPct = Int((clampedInitial / maxValue) * 100)
         bar.addAttribute(.style("width: \(initPct)%"))
         bar.addAttribute(.pair("aria-valuenow", "\(clampedInitial)"))
-        bar.range(min: 0, max: Int(maxValue))
+        bar.range(min: 0, max: progressIntBound(maxValue))
         if let v = variant { bar.variant(v) }
         if striped { bar.striped() }
         if animated { bar.animated() }
@@ -205,4 +206,10 @@ addCallback\(variable.builderId)(updateVariable\(bar.builderId));
 """))
         return bar
     }
+}
+
+/// `value` (positive and finite) as an Int without trapping: values too large for an Int become `Int.max`.
+fileprivate func progressIntBound(_ value: Double) -> Int {
+    // Double(Int.max) rounds up to 2^63, which does not fit; every Double below it does.
+    return value >= Double(Int.max) ? Int.max : Int(value)
 }

@@ -88,9 +88,19 @@ public extension WebOffCanvasBodyElement {
 
 // 7) Fluent modifiers on footer
 public extension WebOffCanvasFooterElement {
+    /// Styles the element as the panel's footer. Bootstrap 5.3 has no `offcanvas-footer` (it used to be
+    /// emitted here, and styled nothing), so the footer is built from utilities: `mt-auto` pins it to the
+    /// bottom of the panel (a flex column) when it is a direct child of the `OffCanvas`, `flex-shrink-0`
+    /// keeps it whole while a long `OffCanvasBody` scrolls, `p-3` gives it the panel's default padding
+    /// (1rem, like the header and body), and `border-top` separates it from the body like a modal footer.
+    /// `wsui-offcanvas-footer` is the hook for app styles.
     @discardableResult
     func classFooter() -> Self {
-        addAttribute(.class("offcanvas-footer"))
+        addAttribute(.class("wsui-offcanvas-footer"))
+        addAttribute(.class("mt-auto"))
+        addAttribute(.class("flex-shrink-0"))
+        addAttribute(.class("p-3"))
+        addAttribute(.class("border-top"))
         return self
     }
 }
@@ -114,83 +124,73 @@ public extension CoreWebEndpoint {
         off.addAttribute(.class(placement.rawValue))
         off.addAttribute(.pair("id", id))
         off.addAttribute(.pair("tabindex", "-1"))
-        off.addAttribute(.custom("aria-labelledby=\"\(WebEscape.attribute("\(id)Label"))\""))
+        off.addAttribute(.pair("aria-labelledby", "\(id)Label"))
         off.backdrop(backdrop)
         off.scrollable(scrollable)
         off.keyboard(keyboard)
-        stack.append(off)
-        content()
-        stack.removeAll(where: { $0.builderId == off.builderId })
+        withParent(off, content)
+        off.labelWithTitle(defaultId: "\(id)Label")
         return off
     }
+
+    // The parts below must sit inside the part named in their message. Wrapper elements in between are
+    // allowed. Anywhere else the mistake is logged, an HTML comment marks the spot and the part is
+    // rendered where it was declared.
 
     @discardableResult
     func OffCanvasHeader(closeButton: Bool = true,
                          _ content: WebComposerClosure) -> WebOffCanvasHeaderElement {
-        guard let _ = stack.last as? WebOffCanvasElement else {
-            fatalError("OffCanvasHeader must be inside OffCanvas { ... }")
-        }
+        requireStructuralParent({ $0 is WebOffCanvasElement }, among: isOffCanvasPart,
+                                "OffCanvasHeader must be inside OffCanvas { ... }")
         let hdr = WebOffCanvasHeaderElement()
         populateCreatedObject(hdr)
         hdr.elementName = "div"
         hdr.classHeader()
-        stack.append(hdr)
-        content()
-        if closeButton {
-            let btn = WebOffCanvasCloseButtonElement()
-            populateCreatedObject(btn)
-            btn.elementName = "button"
-            btn.addAttribute(.class("btn-close"))
-            btn.addAttribute(.custom("data-bs-dismiss=\"offcanvas\""))
-            btn.addAttribute(.custom("aria-label=\"Close\""))
+        return withParent(hdr) {
+            content()
+            if closeButton {
+                let btn = WebOffCanvasCloseButtonElement()
+                populateCreatedObject(btn)
+                btn.elementName = "button"
+                btn.type("button")   // inside a form, a button without a type submits it
+                btn.addAttribute(.class("btn-close"))
+                btn.addAttribute(.custom("data-bs-dismiss=\"offcanvas\""))
+                btn.addAttribute(.custom("aria-label=\"Close\""))
+            }
         }
-        stack.removeAll(where: { $0.builderId == hdr.builderId })
-        return hdr
     }
 
     @discardableResult
     func OffCanvasTitle(_ content: WebComposerClosure) -> WebOffCanvasTitleElement {
-        guard let _ = stack.last as? WebOffCanvasHeaderElement else {
-            fatalError("OffCanvasTitle must be inside OffCanvasHeader { ... }")
-        }
+        requireStructuralParent({ $0 is WebOffCanvasHeaderElement }, among: isOffCanvasPart,
+                                "OffCanvasTitle must be inside OffCanvasHeader { ... }")
         let title = WebOffCanvasTitleElement()
         populateCreatedObject(title)
         title.elementName = "h5"
         title.classTitle()
-        stack.append(title)
-        content()
-        stack.removeAll(where: { $0.builderId == title.builderId })
-        return title
+        return withParent(title, content)
     }
 
     @discardableResult
     func OffCanvasBody(_ content: WebComposerClosure) -> WebOffCanvasBodyElement {
-        guard let _ = stack.last as? WebOffCanvasElement else {
-            fatalError("OffCanvasBody must be inside OffCanvas { ... }")
-        }
+        requireStructuralParent({ $0 is WebOffCanvasElement }, among: isOffCanvasPart,
+                                "OffCanvasBody must be inside OffCanvas { ... }")
         let body = WebOffCanvasBodyElement()
         populateCreatedObject(body)
         body.elementName = "div"
         body.classBody()
-        stack.append(body)
-        content()
-        stack.removeAll(where: { $0.builderId == body.builderId })
-        return body
+        return withParent(body, content)
     }
 
     @discardableResult
     func OffCanvasFooter(_ content: WebComposerClosure) -> WebOffCanvasFooterElement {
-        guard let _ = stack.last as? WebOffCanvasElement else {
-            fatalError("OffCanvasFooter must be inside OffCanvas { ... }")
-        }
+        requireStructuralParent({ $0 is WebOffCanvasElement }, among: isOffCanvasPart,
+                                "OffCanvasFooter must be inside OffCanvas { ... }")
         let footer = WebOffCanvasFooterElement()
         populateCreatedObject(footer)
         footer.elementName = "div"
         footer.classFooter()
-        stack.append(footer)
-        content()
-        stack.removeAll(where: { $0.builderId == footer.builderId })
-        return footer
+        return withParent(footer, content)
     }
     
     /// SwiftUI-like state-driven off-canvas presentation.
@@ -246,7 +246,54 @@ public extension CoreWebEndpoint {
             }
         })();
         """))
-        
+
         return panel
     }
+}
+
+fileprivate extension WebOffCanvasElement {
+
+    /// Points the panel's `aria-labelledby` at its first `OffCanvasTitle` (looking through wrappers, not
+    /// into a nested panel), as Bootstrap's markup does: the title gets the id `defaultId` (`<id>Label`)
+    /// unless it already has an id, which is then used instead. A panel without a title gets no
+    /// `aria-labelledby`, which would name an element that doesn't exist.
+    func labelWithTitle(defaultId: String) {
+        func firstTitle(in element: WebElement) -> WebOffCanvasTitleElement? {
+            for child in element.subElements {
+                if let title = child as? WebOffCanvasTitleElement { return title }
+                if child is WebOffCanvasElement { continue }
+                if let title = firstTitle(in: child) { return title }
+            }
+            return nil
+        }
+        let isLabelledBy: (WebCoreElementAttribute) -> Bool = { attribute in
+            if case .pair(let name, _) = attribute { return name == "aria-labelledby" }
+            return false
+        }
+        guard let title = firstTitle(in: self) else {
+            attributes.removeAll(where: isLabelledBy)
+            return
+        }
+        let existingId = title.attributes.lazy.compactMap { attribute -> String? in
+            switch attribute {
+            case .id(let id): return id
+            case .pair(let name, let id) where name.lowercased() == "id": return id
+            default: return nil
+            }
+        }.first
+        if existingId == nil {
+            title.id(defaultId)
+        }
+        let labelId = existingId ?? defaultId
+        attributes = attributes.map { isLabelledBy($0) ? .pair("aria-labelledby", labelId) : $0 }
+    }
+}
+
+/// The elements that make up an off-canvas panel's structure. Anything else on the builder stack is a wrapper.
+fileprivate func isOffCanvasPart(_ element: WebElement) -> Bool {
+    return element is WebOffCanvasElement
+        || element is WebOffCanvasHeaderElement
+        || element is WebOffCanvasTitleElement
+        || element is WebOffCanvasBodyElement
+        || element is WebOffCanvasFooterElement
 }

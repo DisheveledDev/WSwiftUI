@@ -78,10 +78,7 @@ public extension CoreWebEndpoint {
         pagination.addAttribute(.class("wsui-pagination"))
         if let sz = size { pagination.class(sz.rawValue) }
         pagination.align(alignment)
-        stack.append(pagination)
-        content()
-        stack.removeAll(where: { $0.builderId == pagination.builderId })
-        return pagination
+        return withParent(pagination, content)
     }
 
     /// Creates a pagination item with a link or span
@@ -90,14 +87,16 @@ public extension CoreWebEndpoint {
     ///   - href: optional URL; when nil and not active, renders a <span>
     ///   - active: marks this item active
     ///   - disabled: marks this item disabled
+    ///
+    /// Must sit inside a `Pagination { ... }` (wrapper elements in between are allowed). Anywhere else the
+    /// mistake is logged, an HTML comment marks the spot and the item is rendered where it was declared.
     @discardableResult
     func PaginationItem(page: Int,
                         href: String? = nil,
                         active: Bool = false,
                         disabled: Bool = false) -> WebPaginationItemElement {
-        guard let _ = stack.last as? WebPaginationElement else {
-            fatalError("PaginationItem must be inside Pagination { ... } block")
-        }
+        requireStructuralParent({ $0 is WebPaginationElement }, among: { $0 is WebPaginationElement },
+                                "PaginationItem must be inside Pagination { ... } block")
         // li.page-item
         let item = WebPaginationItemElement()
         populateCreatedObject(item)
@@ -105,27 +104,26 @@ public extension CoreWebEndpoint {
         item.class("page-item")
         item.active(active)
         item.disabled(disabled)
-        stack.append(item)
-        // link or span
-        let tagName: String
-        if disabled || href == nil {
-            tagName = "span"
-        } else {
-            tagName = "a"
+        return withParent(item) {
+            // link or span
+            let tagName: String
+            if disabled || href == nil {
+                tagName = "span"
+            } else {
+                tagName = "a"
+            }
+            let link = WebPaginationLinkElement()
+            populateCreatedObject(link)
+            link.elementName = tagName
+            link.class("page-link")
+            if let url = href, tagName == "a" {
+                link.href(url)
+            }
+            link.innerHTML("\(page)")
+            // span also gets aria-current if active
+            if active {
+                link.addAttribute(.custom("aria-current=\"page\""))
+            }
         }
-        let link = WebPaginationLinkElement()
-        populateCreatedObject(link)
-        link.elementName = tagName
-        link.class("page-link")
-        if let url = href, tagName == "a" {
-            link.href(url)
-        }
-        link.innerHTML("\(page)")
-        // span also gets aria-current if active
-        if active {
-            link.addAttribute(.custom("aria-current=\"page\""))
-        }
-        stack.removeAll(where: { $0.builderId == item.builderId })
-        return item
     }
 }

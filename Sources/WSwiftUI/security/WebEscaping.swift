@@ -204,6 +204,39 @@ public enum WebJSON {
         return String(decoding: out, as: UTF8.self)
     }
 
+    /// `\n//-->\n`: a JavaScript line comment that holds `-->`, written before a `</script>` end tag when the
+    /// script contains `<!--`. In a script element, `<!--` puts the HTML tokenizer in its "escaped" states, and
+    /// a later `<script` (in a string, a comment, anywhere) in the "double escaped" state, where `</script>`
+    /// no longer ends the element: the rest of the page, later scripts included, would become part of this one.
+    /// A `-->` returns the tokenizer to the plain script state in either case, so the end tag after it closes
+    /// the element. For JavaScript it is only a comment, so the script runs exactly as written.
+    static let htmlCommentTerminator = "\n//-->\n"
+
+    /// Whether `js` contains `<!--`.
+    static func containsHTMLCommentOpener(_ js: String) -> Bool {
+        return js.utf8.withContiguousStorageIfAvailable { containsHTMLCommentOpener(bytes: $0) }
+            ?? Array(js.utf8).withUnsafeBufferPointer { containsHTMLCommentOpener(bytes: $0) }
+    }
+
+    private static func containsHTMLCommentOpener(bytes buf: UnsafeBufferPointer<UInt8>) -> Bool {
+        let n = buf.count
+        guard n >= 4 else { return false }
+        var i = 0
+        while i <= n - 4 {
+            if buf[i] == 0x3C && buf[i + 1] == 0x21 && buf[i + 2] == 0x2D && buf[i + 3] == 0x2D {
+                return true
+            }
+            i += 1
+        }
+        return false
+    }
+
+    /// What goes between a script element's `body` and its `</script>`: `htmlCommentTerminator` when the body
+    /// contains `<!--`, otherwise nothing.
+    static func scriptElementTerminator(for body: String) -> String {
+        return containsHTMLCommentOpener(body) ? htmlCommentTerminator : ""
+    }
+
     /// Offsets of every `<` that starts an ASCII case-insensitive `</script`.
     private static func closingScriptTagOffsets(_ buf: UnsafeBufferPointer<UInt8>) -> [Int] {
         let n = buf.count

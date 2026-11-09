@@ -72,7 +72,6 @@ public extension CoreWebEndpoint {
     func Audio(_ src: String) -> WebAudioElement {
         let audio: WebAudioElement = create { el in
             el.elementName = "audio"
-            el.class(el.builderId)
             el.src(src)
             el.addAttribute(.custom("controls"))
         }

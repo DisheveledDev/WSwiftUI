@@ -19,22 +19,16 @@ public extension CoreWebEndpoint {
     /// - Returns: Configured WebLinkElement.
     @discardableResult
     func Link(_ href: String, title: String, target: String? = nil) -> WebElement {
-        var result: WebElement?
-        
-        WrapInLayoutContainer {
-            result = create { el in
+        return withLayoutContainer {
+            create { el in
                 el.elementName = "a"
                 el.addAttribute(.class("wsui-link"))
-                el.addAttribute(.class(el.builderId))
                 el.addAttribute(.href(href))
                 if let t = target {
                     el.addAttribute(.pair("target", t))
                 }
                 el.addAttribute(.innerHTML(WebEscape.html(title)))
             }
-        }
-        
-        return result!
-        
+        }.built
     }
 }

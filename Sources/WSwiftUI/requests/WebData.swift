@@ -111,16 +111,21 @@ public class WebData {
     
     private func consumeURLEncoded(_ data: Data) {
         guard let s = String(data: data, encoding: .utf8) else { return }
-        let pairs = s.split(separator: "&")
-        for pair in pairs {
-            let parts = pair.split(separator: "=", maxSplits: 1)
-            guard parts.count == 2 else { continue }
-            let rawKey = String(parts[0])
-            let rawVal = String(parts[1])
-            let key = rawKey.removingPercentEncoding ?? rawKey
-            let val = rawVal.removingPercentEncoding ?? rawVal
-            combined[key] = val
+        // application/x-www-form-urlencoded as browsers send it: `name=` is an empty value (not a missing
+        // field), a pair without `=` is a name with an empty value, and `+` means a space.
+        for pair in s.split(separator: "&") {
+            let parts = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            let key = Self.formDecode(String(parts[0]))
+            guard key.isEmpty == false else { continue }
+            combined[key] = parts.count == 2 ? Self.formDecode(String(parts[1])) : ""
         }
+    }
+
+    /// Decodes one name or value of a url-encoded form body: `+` becomes a space, then percent-escapes are
+    /// decoded. A value with a malformed escape is kept as sent (after the `+` replacement).
+    static func formDecode(_ raw: String) -> String {
+        let spaced = raw.replacingOccurrences(of: "+", with: " ")
+        return spaced.removingPercentEncoding ?? spaced
     }
     
     // MARK: - In-memory multipart

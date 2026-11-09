@@ -331,11 +331,7 @@ public extension CoreWebEndpoint {
 
         """))
         
-        stack.append(form)
-        content()
-        stack.removeAll(where: { $0.builderId == form.builderId })
-        return form
-        
+        return withParent(form, content)
     }
 
 }

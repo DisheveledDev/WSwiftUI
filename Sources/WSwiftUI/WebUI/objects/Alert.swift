@@ -68,22 +68,20 @@ public extension CoreWebEndpoint {
                 el.`class`("show")
             }
         }
-        stack.append(alert)
-        // User content goes here
-        content()
-        // Append close button if dismissible
-        if dismissible {
-            _ = createAlert { el in
-                el.elementName = "button"
-                el.type("button")
-                el.class("btn-close")
-                el.addAttribute(.custom("data-bs-dismiss=\"alert\""))
-                el.addAttribute(.custom("aria-label=\"Close\""))
+        return withParent(alert) {
+            // User content goes here
+            content()
+            // Append close button if dismissible
+            if dismissible {
+                _ = createAlert { el in
+                    el.elementName = "button"
+                    el.type("button")
+                    el.class("btn-close")
+                    el.addAttribute(.custom("data-bs-dismiss=\"alert\""))
+                    el.addAttribute(.custom("aria-label=\"Close\""))
+                }
             }
         }
-        // Pop alert from stack
-        stack.removeAll(where: { $0.builderId == alert.builderId })
-        return alert
     }
     
     /// SwiftUI-like state-driven alert.

@@ -55,13 +55,17 @@ struct ScriptContextObjectsTests {
             let showModal = page.WBool(false)
             let showPanel = page.WBool(false)
             let modal = page.Modal(id: H, isPresented: showModal) {}
-            let panel = page.OffCanvas(id: H + "2", isPresented: showPanel) {}
+            // (with a title: a panel without one gets no aria-labelledby, which would name nothing)
+            let panel = page.OffCanvas(id: H + "2", isPresented: showPanel) {
+                page.OffCanvasHeader { page.OffCanvasTitle { page.Text("title") } }
+            }
             modalScripts = scripts(of: modal)
             panelScripts = scripts(of: panel)
             presentedIds = [showModal.builderId, showPanel.builderId]
         }
         ScriptScan.expectNoBreakout(html)
         #expect(html.contains("aria-labelledby=\"\(WebEscape.attribute(H + "2Label"))\""))
+        #expect(html.contains("id=\"\(WebEscape.attribute(H + "2Label"))\""))
 
         guard NodeJS.isAvailable else { return }
         let syntax = try NodeJS.run(scripts: ScriptScan.inlineScripts(in: html))

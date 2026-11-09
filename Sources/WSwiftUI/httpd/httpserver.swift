@@ -233,6 +233,19 @@ public final class HttpResponse {
     public var onUpgraded: (() -> Void)?
     
     public init() {}
+
+    /// A field-for-field copy, made without going back through the validating builders (everything here
+    /// was validated when it was first set). Kept next to the stored properties so a new one can't be missed.
+    internal func copy() -> HttpResponse {
+        let copy = HttpResponse()
+        copy.status = status
+        copy.headers = headers
+        copy.bodyBytes = bodyBytes
+        copy.bodyFileUrl = bodyFileUrl
+        copy.bodyFileHandleRange = bodyFileHandleRange
+        copy.onUpgraded = onUpgraded
+        return copy
+    }
     
     // Fluent
     @discardableResult public func status(_ s: HttpStatus) -> Self { self.status = s; return self }

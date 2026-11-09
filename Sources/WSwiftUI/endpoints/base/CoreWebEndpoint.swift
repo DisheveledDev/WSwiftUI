@@ -140,22 +140,29 @@ internal enum WebCoreLayoutType {
 }
 
 public class WebElement {
-    
-    public var builderId: String = UUID()
-        .uuidString
-        .replacingOccurrences(of: "-", with: "")
-        .trimmingCharacters(in: CharacterSet.decimalDigits)
-        .prefix(12)
-        .lowercased()
-    
+
+    /// The element's id: its CSS class, the name of its JavaScript global (`<id>` is the element once the page
+    /// has loaded, when a script refers to it) and the stem of its generated function names.
+    ///
+    /// An element created through an endpoint (every DSL control, `create {}`, the `W...` variables) gets
+    /// `<namespace>_<n>`: the endpoint's id namespace (`CoreWebEndpoint.elementIdNamespace`, or a short random
+    /// one per endpoint instance) and a base-36 counter, e.g. `kq3xa_1f`. That is a valid JavaScript
+    /// identifier and CSS class, never empty, unique within the page, and (because of the `_`) never the
+    /// name of a Bootstrap class or a browser global. An element created on its own (`WebElement()`) gets a
+    /// random id of the same shape until an endpoint adopts it.
+    public lazy var builderId: String = WebElementId.fallback()
+
     internal var attributes: [WebCoreElementAttribute] = []
     internal var layout: WebCoreLayoutType = .vertical
     public var elementName: String = "div"
     public var subElements: [WebElement] = []
 
+    /// Adds an attribute. A `.script` or `.domLoadedScript` added from outside the WSwiftUI module (app code)
+    /// is raw JavaScript: it is emitted in a `<script>` element of its own, so a syntax error in it can't stop
+    /// the framework's scripts or another element's. `file` identifies the caller; leave it defaulted.
     @discardableResult
-    public func addAttribute(_ attribute: WebCoreElementAttribute) -> Self {
-        attributes.append(attribute)
+    public func addAttribute(_ attribute: WebCoreElementAttribute, file: StaticString = #fileID) -> Self {
+        attributes.append(WebScriptOrigin.tagged(attribute, addedFrom: file))
         return self
     }
     
@@ -190,10 +197,17 @@ public class WebElement {
         return self
     }
     
+    /// Sets the element's `name`. An element has one name: this replaces any earlier `.name(...)` or
+    /// `.pair("name", ...)`.
     @discardableResult
     public func name(_ name: String)  -> Self {
-        // remove existing name etries to stop duplication
-        attributes.removeAll(where: { if case .name(_) = $0 { return true } else { return false } })
+        attributes.removeAll(where: {
+            switch $0 {
+                case .name: return true
+                case .pair(let key, _): return key.lowercased() == "name"
+                default: return false
+            }
+        })
         addAttribute(.name(name))
         return self
     }
@@ -208,8 +222,18 @@ public class WebElement {
         
     }
     
+    /// Sets the element's `value`. An element has one value: this replaces any earlier `.value(...)` or
+    /// `.pair("value", ...)`. (A variable's hidden input always renders the variable's current value, and a
+    /// password input never renders one.)
     @discardableResult
     public func value(_ value: String)  -> Self {
+        attributes.removeAll(where: {
+            switch $0 {
+                case .value: return true
+                case .pair(let key, _): return key.lowercased() == "value"
+                default: return false
+            }
+        })
         addAttribute(.value(value))
         return self
     }
@@ -297,9 +321,12 @@ public class WebElement {
         return self
     }
     
+    /// Runs `script` once the page's body has been parsed (all element scripts run, in document order, from
+    /// the end of `<body>`). Called from app code, the script is raw JavaScript and gets a `<script>` element
+    /// of its own; see `addAttribute(_:file:)`. `file` identifies the caller; leave it defaulted.
     @discardableResult
-    public func script(_ script: String)  -> Self {
-        addAttribute(.script(script))
+    public func script(_ script: String, file: StaticString = #fileID)  -> Self {
+        addAttribute(.script(script), file: file)
         return self
     }
     
@@ -317,36 +344,53 @@ public class WebElement {
         return self
     }
     
-    /// hides the button via class and attribute
+    // MARK: Hiding
+    //
+    // Every `hidden` overload hides the element the same way: it gets Bootstrap's `d-none` class
+    // (`display: none !important`). A hidden element takes no space in the layout, can't be focused or
+    // clicked, and is not read by screen readers; it stays in the page, so it can be shown again. This is
+    // the same mechanism as the `.hide(ref:)` / `.show(ref:)` actions, so they work on it too.
+    // Unlike SwiftUI's `.hidden()`, the element does not keep its space; `.class("invisible")`
+    // (`visibility: hidden`) does that. To hide something from sighted users only, and keep it for screen
+    // readers, use `visuallyHidden()`.
+    
+    /// Hides the element (`display: none`, see above) when `hidden` is `true`, which is the default, so
+    /// `.hidden()` hides. `.hidden(false)` adds nothing.
     @discardableResult
-    public func hidden(_ hidden: Bool = false) -> Self {
+    public func hidden(_ hidden: Bool = true) -> Self {
         if hidden {
-            addAttribute(.class("visually-hidden"))
+            addAttribute(.class("d-none"))
         }
         return self
     }
     
+    /// This overload never had any effect: a `WebAction` describes something to do, not a condition.
+    @available(*, deprecated, message: "This overload has no effect. Use hidden(_: Bool), hidden(_: WebVariableElement), or the .hide(ref:) / .show(ref:) actions.")
     @discardableResult
     public func hidden(_ condition: WebAction) -> Self {
-        
         return self
     }
     
-    /// hides the button via class and attribute
+    /// Hides the element (`display: none`, see above) while the bound variable is truthy, and shows it
+    /// while it is falsy. The server renders the variable's current state; the browser then follows every
+    /// change of the variable.
     @discardableResult
     public func hidden(_ hidden: WebVariableElement) -> Self {
+        // An anonymous callback, so it can't collide with another `updateVariable<builderId>` function
+        // declared for the same element (for example by `disabled(_:)`).
         addAttribute(.script("""
-            function updateVariable\(builderId)(value, _meta) {
+            addCallback\(hidden.builderId)(function (value, _meta) {
+                var element = \(builderId);
+                if (!element) { return; }
                 if (value) {
-                    \(builderId).classList.add("visually-hidden");
+                    element.classList.add("d-none");
                 } else {
-                    \(builderId).classList.remove("visually-hidden");
+                    element.classList.remove("d-none");
                 }
-            }
-            addCallback\(hidden.builderId)(updateVariable\(builderId));
+            });
             """))
         if hidden.asBool() {
-            addAttribute(.class("visually-hidden"))
+            addAttribute(.class("d-none"))
         }
         return self
     }
@@ -404,14 +448,24 @@ public enum WebClientDeviceKind: String {
 
 public extension HttpRequest {
     var clientDeviceKind: WebClientDeviceKind {
-        let headers = head.headerMap
-        
-        if let mobileHint = headers["sec-ch-ua-mobile"]?.trimmingCharacters(in: .whitespacesAndNewlines) {
+        // The two headers this needs, found without building the whole `headerMap`. As in `headerMap`, a
+        // header that is sent twice counts with its last value.
+        var mobileHeader: String? = nil
+        var userAgent: String? = nil
+        for (name, value) in head.headers {
+            if name.caseInsensitiveCompare("sec-ch-ua-mobile") == .orderedSame {
+                mobileHeader = value
+            } else if name.caseInsensitiveCompare("user-agent") == .orderedSame {
+                userAgent = value
+            }
+        }
+
+        if let mobileHint = mobileHeader?.trimmingCharacters(in: .whitespacesAndNewlines) {
             if mobileHint.contains("?1") { return .mobile }
             if mobileHint.contains("?0") { return .desktop }
         }
-        
-        let ua = (headers["user-agent"] ?? "").lowercased()
+
+        let ua = (userAgent ?? "").lowercased()
         if ua.isEmpty {
             return .desktop
         }
@@ -440,8 +494,15 @@ public extension HttpRequest {
 }
 
 public extension CoreWebEndpoint {
+    /// The kind of device the request came from. Worked out once per request (the renderer asks for every
+    /// `.deviceClass`), and again only when `request` is replaced.
     var clientDeviceKind: WebClientDeviceKind {
-        request.clientDeviceKind
+        if let cached = deviceKindCache, cached.request === request {
+            return cached.kind
+        }
+        let kind = request.clientDeviceKind
+        deviceKindCache = (request, kind)
+        return kind
     }
 }
 
@@ -550,28 +611,34 @@ public protocol WebApiEndpoint {
     func acceptedRoles() -> [String]?
 }
 
-internal extension [WebElement] {
-    mutating func push(_ element: WebElement, _ closure: (() -> Void)) {
-        self.append(element)
-        closure()
-        self.removeAll(where: { $0.builderId == element.builderId })
-    }
-}
-
 internal extension CoreWebEndpoint {
-    /// Re-applies the state recorded by `validateData(_:)` (`previous_<name>` / `error_<name>`) to a bound variable
-    /// when a form is re-rendered.
+    /// Called by every form control bound to `value` that submits it under the variable's name (TextField,
+    /// SecureField, TextArea, Picker). Re-applies the state recorded by `validateData(_:)`
+    /// (`previous_<name>` / `error_<name>`) when a form is re-rendered: the variable's value (definition
+    /// script, hidden carrier `value`, page-load sync, and the control, which reads it afterwards) and its
+    /// error message.
     ///
-    /// - Parameter restoreValue: pass `false` for secret inputs (password fields). The submitted value is then
-    ///   never copied back into the variable (so it can't be echoed into the page), and it is dropped from
-    ///   `ephemeralData` so a later control bound to the same name can't restore it either. Error messages are
-    ///   still applied.
-    func updateWithEphermeralData(_ value: WebVariableElement, restoreValue: Bool = true) {
-        
+    /// - Parameters:
+    ///   - restoreValue: pass `false` for secret inputs (password fields). The submitted value is then never
+    ///     copied back into the variable (so it can't be echoed into the page), and it is dropped from
+    ///     `ephemeralData` so a later control bound to the same name can't restore it either. Error messages
+    ///     are still applied.
+    ///   - claimsFieldName: `true` (the default) when the control submits the field under the variable's
+    ///     name; the variable's hidden carrier input then leaves the field to the control instead of
+    ///     submitting it a second time. Pass `false` only for a control that does not submit the field
+    ///     itself, so the carrier keeps submitting it. (A control in the carrier's form that submits a field
+    ///     of the same name takes it over anyway when the page is rendered, see `WebFormFieldClaims`; a
+    ///     checkbox does too, so an unchecked box submits nothing, as in plain HTML.)
+    func updateWithEphermeralData(_ value: WebVariableElement, restoreValue: Bool = true, claimsFieldName: Bool = true) {
+
         guard let name = value.internalName else {
             return
         }
         
+        if claimsFieldName {
+            value.claimFormField(name)
+        }
+
         if restoreValue == false {
             ephemeralData.removeValue(forKey: "previous_\(name)")
         }
@@ -604,17 +671,26 @@ internal extension CoreWebEndpoint {
             return false
         }
         
+        // A double outside Int's range (or NaN / infinite) would trap in `Int(_:)`.
+        func intValue(_ d: Double) -> Int? {
+            return Int(exactly: d.rounded(.towardZero))
+        }
+
         func parseInt(_ raw: Any) -> Int {
             if let i = raw as? Int { return i }
-            if let d = raw as? Double { return Int(d) }
-            if let s = raw as? String, let i = Int(s) { return i }
+            if let d = raw as? Double { return intValue(d) ?? 0 }
+            if let s = raw as? String {
+                let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let i = Int(trimmed) { return i }
+                if let d = Double(trimmed), let i = intValue(d) { return i }
+            }
             return 0
         }
         
         func parseDouble(_ raw: Any) -> Double {
             if let d = raw as? Double { return d }
             if let i = raw as? Int { return Double(i) }
-            if let s = raw as? String, let d = Double(s) { return d }
+            if let s = raw as? String, let d = Double(s.trimmingCharacters(in: .whitespacesAndNewlines)) { return d }
             return 0
         }
         
@@ -622,7 +698,8 @@ internal extension CoreWebEndpoint {
             if let s = raw as? String { return s }
             if let b = raw as? Bool { return b ? "true" : "false" }
             if let i = raw as? Int { return String(i) }
-            if let d = raw as? Double { return String(d) }
+            // the text the client shows for the number (JS `String(number)`)
+            if let d = raw as? Double { return ScriptValue.numberText(d) }
             return String(describing: raw)
         }
         
@@ -654,63 +731,26 @@ internal extension CoreWebEndpoint {
             return [:]
         }
         
-        func jsonString(from object: Any) -> String? {
-            guard JSONSerialization.isValidJSONObject(object),
-                  let data = try? JSONSerialization.data(withJSONObject: object, options: []),
-                  let string = String(data: data, encoding: .utf8) else {
-                return nil
+        if let previousValue = ephemeralData["previous_\(name)"], let rawValue = previousValue {
+            let sourceValue: Any
+            if let jsonValue = rawValue as? JSONValue {
+                sourceValue = anyFromJSONValue(jsonValue)
+            } else {
+                sourceValue = rawValue
             }
-            return string
-        }
-        
-        if let previousValue = ephemeralData["previous_\(name)"] {
-            if let rawValue = previousValue {
-                let sourceValue: Any
-                if let jsonValue = rawValue as? JSONValue {
-                    sourceValue = anyFromJSONValue(jsonValue)
-                } else {
-                    sourceValue = rawValue
-                }
-                
-                let normalizedValue: Any
-                let serializedForHidden: String
-                
-                switch value.variableType {
-                    case .bool:
-                        let normalized = parseBool(sourceValue)
-                        normalizedValue = normalized
-                        serializedForHidden = normalized ? "true" : "false"
-                    case .int:
-                        let normalized = parseInt(sourceValue)
-                        normalizedValue = normalized
-                        serializedForHidden = String(normalized)
-                    case .double:
-                        let normalized = parseDouble(sourceValue)
-                        normalizedValue = normalized
-                        serializedForHidden = String(normalized)
-                    case .string:
-                        let normalized = parseString(sourceValue)
-                        normalizedValue = normalized
-                        serializedForHidden = normalized
-                    case .array:
-                        let normalized = parseStringArray(sourceValue)
-                        normalizedValue = normalized
-                        serializedForHidden = jsonString(from: normalized) ?? "[]"
-                    case .object:
-                        let normalized = parseObject(sourceValue)
-                        normalizedValue = normalized
-                        serializedForHidden = jsonString(from: normalized) ?? "{}"
-                }
-                
-                value.setInitialValue(normalizedValue)
-                value.attributes.removeAll(where: {
-                    if case .initialValue = $0 { return true }
-                    if case .value = $0 { return true }
-                    return false
-                })
-                value.addAttribute(.initialValue(normalizedValue))
-                value.addAttribute(.value(serializedForHidden))
+
+            let normalizedValue: Any
+            switch value.variableType {
+                case .bool:   normalizedValue = parseBool(sourceValue)
+                case .int:    normalizedValue = parseInt(sourceValue)
+                case .double: normalizedValue = parseDouble(sourceValue)
+                case .string: normalizedValue = parseString(sourceValue)
+                case .array:  normalizedValue = parseStringArray(sourceValue)
+                case .object: normalizedValue = parseObject(sourceValue)
             }
+
+            // the hidden carrier renders its `value` from this (WebVariableElement.formValue)
+            value.replaceValue(normalizedValue)
         }
         
         if let errorMessage = ephemeralData ["error_\(name)"] as? String {
@@ -740,34 +780,76 @@ open class CoreWebEndpoint {
     // session data
     public var ephemeralData: [String : Any?] = [:]
     public var authenticationIdentifier: String? = nil
-    internal var newAuthenticationIdentifier: String? = nil
-    /// Where `authenticationIdentifier` came from; set by WSwiftServer for each request.
-    internal var authenticationTokenSource: AuthenticationTokenSource = .none
-    internal var sessionExpiry: Date? = nil
+    /// This request's session (see SessionLifecycle.swift). WSwiftServer installs a new one for
+    /// each request it dispatches; an endpoint that is not being dispatched has a detached one.
+    /// Where `authenticationIdentifier` came from is `sessionContext.credential?.source`.
+    internal var sessionContext: SessionRequestContext = SessionRequestContext()
     internal var headAttributes: [WebCoreHeadElement] = []
     
-    /// A 302 redirect to `path`, carrying the session cookie under the same rules as page
-    /// responses (see `SessionCookie.value(newIdentifier:currentIdentifier:source:)`).
+    /// A 302 redirect to `path`. Like every response this endpoint returns, it gets the session
+    /// cookie from the server after the endpoint finishes, so `authenticateSession` and
+    /// `deauthenticateSession` may be called before or after building it.
     public func redirect(_ path: String) -> HttpResponse {
-        return SessionCookie.apply(to: HttpResponse().redirect(to: path), for: self)
+        return HttpResponse().redirect(to: path)
     }
     
+    /// Logs the client in with `token`: the response sets the session cookie to it.
+    /// With `expiry` the cookie lives until then (`Max-Age` = expiry - now, at least 0) and is
+    /// never renewed past or short of it; without, it lives `WebSessionConfig.maxAge` seconds and
+    /// slides when `sliding` is on. Between this and `deauthenticateSession()`, the last call wins.
     public func authenticateSession(token: String, expiry: Date? = nil) {
-        newAuthenticationIdentifier = token
+        sessionContext.establish(token: token, expiry: expiry)
     }
     
+    /// Logs the client out: the response expires the session cookie (and its expiry companion),
+    /// even on an `[.authenticated]` endpoint, and `WSwiftServer.onSessionEnded` is called with the
+    /// token in effect (the one set earlier in this request by `authenticateSession`, otherwise the
+    /// request's own token) so the app can revoke it, and again with the session cookie's token when
+    /// that is a different one; at most once per token per request.
+    /// Register `onSessionEnded` for a reliable logout: without server-side revocation, a request
+    /// still carrying the old cookie is accepted (and renewed) by `onGetUserRoles` as before.
     public func deauthenticateSession() {
-        newAuthenticationIdentifier = nil
+        sessionContext.end(requestToken: authenticationIdentifier)
     }
     
     // data for final object construction
     internal var title: String? = nil
     internal var head: [HeadItem] = []
     internal var builderScripts: [String] = []
-    internal var webRootElement: WebElement? = nil
+    /// The synthetic document root. Every element created outside a container (before, inside or after
+    /// `webpage {}`) is appended to it in creation order. It is a `WebFragmentElement`, so it is never
+    /// rendered itself: `renderWebPage()` emits its children into `<body>`.
+    internal let documentRoot: WebElement = WebFragmentElement()
+    /// The element top-level content hangs from: always `documentRoot`. (It used to be whichever element
+    /// was created first, which was then never rendered.)
+    internal var webRootElement: WebElement? { documentRoot }
     internal var stack: [WebElement] = []
+    /// DOMContentLoaded scripts queued on the endpoint itself. The renderer reads them (before the ones its
+    /// elements carry) and never appends to them, so rendering a page twice gives the same output.
     internal var domLoadedScripts: [String] = []
-    
+
+    /// The namespace of the ids of the elements this endpoint creates (`WebElement.builderId` is
+    /// `<namespace>_<n>`, `n` counting up in base 36).
+    ///
+    /// By default (`nil`) every endpoint instance, and so every request, picks a short random namespace. A page
+    /// and the HTML of other requests inserted into it (a `showModal(ref:contentURL:)` body, markup fetched by
+    /// your own scripts) therefore never share an element id.
+    ///
+    /// Set a fixed namespace (letters and digits, starting with a letter; other characters are dropped) to
+    /// make the output deterministic: the same page then renders byte-identical HTML on every request, which
+    /// allows snapshot tests and ETags. Use a different namespace for each endpoint whose HTML ends up in the
+    /// same browser page. Set it before the page creates its first element, e.g. in `init()` or at the top of
+    /// `content()`.
+    public var elementIdNamespace: String? = nil
+    /// How many element ids this endpoint has handed out.
+    internal var elementIdCounter: Int = 0
+    /// The namespace used while `elementIdNamespace` is `nil`: picked once per endpoint instance.
+    internal lazy var randomElementIdNamespace: String = WebElementId.randomNamespace()
+    /// `elementIdNamespace` as last sanitized, so it is checked once rather than for every element.
+    internal var sanitizedElementIdNamespace: (raw: String, value: String?)? = nil
+    /// `clientDeviceKind` of `request`, worked out once per request.
+    internal var deviceKindCache: (request: HttpRequest, kind: WebClientDeviceKind)? = nil
+
     // default content methods
     open func content() -> Any? {
         return HttpResponse().status(.notFound)
