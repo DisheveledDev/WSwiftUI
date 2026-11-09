@@ -20,7 +20,7 @@ public extension CoreWebEndpoint {
         // this is the entire setup and implementation of the websocket connection
         socket.script("""
             (function() {
-                const rawUrl = "\(url)";
+                const rawUrl = \(ScriptValue.string(url));
 
                 // Optional server-provided base (e.g., <meta name="ws-base" content="wss://sockets.example.com">)
                 let baseHref = window.location.href;
@@ -60,13 +60,13 @@ public extension CoreWebEndpoint {
                 });
 
                 websocket\(socket.builderId).addEventListener("message", (event) => {
-                    // all actions expect an object called `result`
+                    // all actions expect an object called result
                     var result = event.data;
                     \(CompileActions(onRecieve, builderId: socket.builderId))
                 });
 
                 websocket\(socket.builderId).addEventListener("error", (event) => {
-                    // all actions expect an object called `result`
+                    // all actions expect an object called result
                     var result = event.error;
                     \(CompileActions(onError, builderId: socket.builderId))
                 });

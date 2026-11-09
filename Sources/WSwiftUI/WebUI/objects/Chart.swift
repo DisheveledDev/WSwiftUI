@@ -172,13 +172,15 @@ public struct ChartOptions {
 
 public class WebChartElement: WebElement {}
 
+/// Encodes a value as a JSON literal for the chart's `<script>`. The output is script-safe (see
+/// `ScriptValue.json`), so labels/titles can't close the script element or break the literal.
 private func encodeJSON<T: Encodable>(_ value: T) -> String {
     let encoder = JSONEncoder()
     guard let data = try? encoder.encode(value),
           let json = String(data: data, encoding: .utf8) else {
         return "null"
     }
-    return json
+    return ScriptValue.json(json)
 }
 
 private extension ChartOptions {

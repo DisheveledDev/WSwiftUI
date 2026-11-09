@@ -7,14 +7,6 @@
 
 import Foundation
 
-private func escapeForJSTemplate(_ s: String) -> String {
-    var out = s
-    out = out.replacingOccurrences(of: "\\", with: "\\\\")
-    out = out.replacingOccurrences(of: "`", with: "\\`")
-    out = out.replacingOccurrences(of: "${", with: "\\${")
-    return out
-}
-
 internal extension String {
     /// Escapes the string for safe HTML output.
     ///
@@ -111,6 +103,11 @@ internal extension String {
         for c in self {
             if let entity = escapeMap[c] {
                 result.append(entity)
+            } else if c.unicodeScalars.count > 1 {
+                // A multi-scalar grapheme cluster can carry a markup character that the per-Character map
+                // above can't see (e.g. a Prepend mark such as U+0600 clusters with a following "<"), so
+                // escape such clusters scalar by scalar.
+                result.append(WebEscape.html(String(c)))
             } else {
                 result.append(c)
             }
@@ -281,8 +278,8 @@ public extension CoreWebEndpoint {
                 element.elementName = "span"
                 element.class(element.builderId)
                 
-                // initial value
-                element.addAttribute(.innerHTML(binding.asString()))
+                // initial value, escaped like Text(String); client-side updates below are written as text
+                element.addAttribute(.innerHTML(binding.asString().escapedForHTML()))
                 
                 // register a callback for updates
                 element.script("""
@@ -320,10 +317,11 @@ public extension CoreWebEndpoint {
                 element.class("wsui-text")
 
                 // Client-side dynamic updates: when any binding changes, re-render the formatted string
-                let jsFormat = escapeForJSTemplate(format)
+                // (written with textContent). The format is embedded as a script-safe string literal.
+                let jsFormat = WebJSON.scriptString(format)
                 var script = """
                 (function(){
-                    var fmt = `\(jsFormat)`;
+                    var fmt = \(jsFormat);
                     var values = [];
                     function render(){
                         try {

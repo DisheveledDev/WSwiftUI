@@ -18,5 +18,6 @@ let package = Package(
   targets: [
     .target(name: "WSwiftUI", path: "Sources/WSwiftUI"),
     .executableTarget(name: "WSwiftUITest",dependencies: ["WSwiftUI"], path: "Sources/WSwiftUITest"),
+    .testTarget(name: "WSwiftUITests", dependencies: ["WSwiftUI"], path: "Tests/WSwiftUITests"),
   ]
 )

@@ -64,7 +64,9 @@ public extension WebElement {
         let keyConditionOpen: String
         let keyConditionClose: String
         if let key = keyFilter {
-            keyConditionOpen = "if (event.key === '\\(key)') {\n"
+            // The key name is emitted as a script-safe string literal. (Previously the interpolation was
+            // escaped by mistake, emitting the literal text `'\(key)'`, so the filter never matched.)
+            keyConditionOpen = "if (event.key === \(ScriptValue.string(key))) {\n"
             keyConditionClose = "}\n"
         } else {
             keyConditionOpen = ""
@@ -395,7 +397,7 @@ var disableInterval\(builderId) = setInterval(function() {
 
     @discardableResult
     func onTimer(seconds: Double, _ actions: [WebAction]) -> Self {
-        let ms = Int(seconds * 1000)
+        let ms = ScriptValue.milliseconds(fromSeconds: seconds)
         let actionsJS = compileActions(actions)
         let js = """
 var timerInterval_\(builderId);

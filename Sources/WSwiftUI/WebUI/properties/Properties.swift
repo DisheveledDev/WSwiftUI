@@ -141,39 +141,9 @@ public enum Operator {
     case isPositive
     case isNegative
     
+    /// Legacy name for `scriptSafeCondition` (security/ScriptContext.swift), kept so both always agree.
     var javascriptCondition: String {
-        get {
-            switch self {
-            case .equals(let comparitor):
-                if let stringValue = comparitor as? String {
-                    return "== '\(stringValue)'"
-                } else if let intValue = comparitor as? Int {
-                    return "== \(intValue)"
-                } else if let doubleValue = comparitor as? Double {
-                    return "== \(doubleValue)"
-                } else if let boolValue = comparitor as? Bool {
-                    return "== \(boolValue ? "true" : "false")"
-                } else {
-                    return "== '\(comparitor)'"
-                }
-            case .isEmpty:
-                return "== ''"
-            case .isNotEmpty:
-                return "!= ''"
-            case .isTrue:
-                return "== true"
-            case .isFalse:
-                return "== false"
-            case .isZero:
-                return "== 0"
-            case .isNonzero:
-                return "!= 0"
-            case .isPositive:
-                return "> 0"
-            case .isNegative:
-                return "< 0"
-            }
-        }
+        return scriptSafeCondition
     }
     
 }

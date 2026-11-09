@@ -69,7 +69,7 @@ public extension WebCarouselItemElement {
 public extension WebCarouselIndicatorElement {
     @discardableResult
     func target(_ carouselId: String, index: Int) -> Self {
-        addAttribute(.custom("data-bs-target=\"#\(carouselId)\""))
+        addAttribute(.custom("data-bs-target=\"\(WebEscape.attribute("#\(carouselId)"))\""))
         addAttribute(.custom("data-bs-slide-to=\"\(index)\""))
         return self
     }
@@ -80,7 +80,7 @@ public extension WebCarouselIndicatorElement {
             addAttribute(.custom("aria-current=\"true\""))
         }
         if let lbl = label {
-            addAttribute(.custom("aria-label=\"\(lbl)\""))
+            addAttribute(.custom("aria-label=\"\(WebEscape.attribute(lbl))\""))
         }
         return self
     }
@@ -92,7 +92,7 @@ public extension WebCarouselControlElement {
     @discardableResult
     func prev(_ carouselId: String) -> Self {
         addAttribute(.class("carousel-control-prev"))
-        addAttribute(.custom("href=\"#\(carouselId)\""))
+        addAttribute(.custom("href=\"\(WebEscape.attribute("#\(carouselId)"))\""))
         addAttribute(.custom("role=\"button\""))
         addAttribute(.custom("data-bs-slide=\"prev\""))
         return self
@@ -101,7 +101,7 @@ public extension WebCarouselControlElement {
     @discardableResult
     func next(_ carouselId: String) -> Self {
         addAttribute(.class("carousel-control-next"))
-        addAttribute(.custom("href=\"#\(carouselId)\""))
+        addAttribute(.custom("href=\"\(WebEscape.attribute("#\(carouselId)"))\""))
         addAttribute(.custom("role=\"button\""))
         addAttribute(.custom("data-bs-slide=\"next\""))
         return self
@@ -191,7 +191,7 @@ public extension CoreWebEndpoint {
                 classes = " active"
                 ariaCurrent = " aria-current=\"true\""
             }
-            html += "<li data-bs-target=\"#\(id)\" data-bs-slide-to=\"\(idx)\" class=\"\(classes)\"\(ariaCurrent)></li>"
+            html += "<li data-bs-target=\"\(WebEscape.attribute("#\(id)"))\" data-bs-slide-to=\"\(idx)\" class=\"\(classes)\"\(ariaCurrent)></li>"
         }
         container.addAttribute(.innerHTML(html))
         return container
@@ -210,7 +210,7 @@ public extension CoreWebEndpoint {
         let lbl = label ?? "Previous"
         ctrl.addAttribute(.innerHTML("""
 <span class=\"carousel-control-prev-icon\" aria-hidden=\"true\"></span>
-<span class=\"visually-hidden\">\(lbl)</span>
+<span class=\"visually-hidden\">\(WebEscape.html(lbl))</span>
 """))
         return ctrl
     }
@@ -227,7 +227,7 @@ public extension CoreWebEndpoint {
         let lbl = label ?? "Next"
         ctrl.addAttribute(.innerHTML("""
 <span class=\"carousel-control-next-icon\" aria-hidden=\"true\"></span>
-<span class=\"visually-hidden\">\(lbl)</span>
+<span class=\"visually-hidden\">\(WebEscape.html(lbl))</span>
 """))
         return ctrl
     }

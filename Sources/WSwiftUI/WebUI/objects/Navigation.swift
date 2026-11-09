@@ -19,6 +19,14 @@ public enum NavBarBackground: String {
 
 // MARK: – DSL
 public extension CoreWebEndpoint {
+  /// Builds a Bootstrap navbar.
+  ///
+  /// - Parameters:
+  ///   - brand: **Trusted HTML**, emitted raw inside the brand link so it can contain markup such as a logo
+  ///     (`<img src="logo.png" height="40">`). Never pass user-supplied or database text here unescaped; wrap
+  ///     plain text in `WebEscape.html(_:)` first.
+  ///   - href: Destination of the brand link (escaped).
+  ///   - content: Closure adding `NavBarItem` / `NavDropdown` entries, whose titles are plain text (escaped).
   @discardableResult
   func NavBar(
     brand: String,
@@ -59,7 +67,7 @@ public extension CoreWebEndpoint {
     brandEl.elementName = "a"
     brandEl.addAttribute(.class("navbar-brand"))
     brandEl.addAttribute(.pair("href", href))
-    brandEl.innerHTML(brand)
+    brandEl.innerHTML(brand)   // trusted HTML by design (see doc comment)
     // (no push—brand is leaf)
 
     // 4) Toggler
@@ -127,7 +135,7 @@ public extension CoreWebEndpoint {
     if disabled { cls += " disabled"; a.addAttribute(.pair("aria-disabled", "true")) }
     a.addAttribute(.class(cls))
     a.addAttribute(.pair("href", href))
-    a.innerHTML(title)
+    a.innerHTML(WebEscape.html(title))
 
     stack.removeAll(where: { $0.builderId == li.builderId })
 
@@ -159,7 +167,7 @@ public extension CoreWebEndpoint {
     toggle.addAttribute(.pair("role", "button"))
     toggle.addAttribute(.pair("data-bs-toggle", "dropdown"))
     toggle.addAttribute(.pair("aria-expanded", "false"))
-    toggle.innerHTML(title)
+    toggle.innerHTML(WebEscape.html(title))
 
     let menu = WebNavBarDropdownMenuElement()
     populateCreatedObject(menu)
@@ -195,7 +203,7 @@ public extension CoreWebEndpoint {
     if disabled { cls += " disabled"; a.addAttribute(.pair("aria-disabled", "true")) }
     a.addAttribute(.class(cls))
     a.addAttribute(.pair("href", href))
-    a.innerHTML(title)
+    a.innerHTML(WebEscape.html(title))
 
     stack.removeAll(where: { $0.builderId == li.builderId })
 
@@ -215,7 +223,7 @@ public extension CoreWebEndpoint {
     populateCreatedObject(li)
     li.elementName = "li"
     li.addAttribute(.class("dropdown-header"))
-    li.innerHTML(title)
+    li.innerHTML(WebEscape.html(title))
     return li
   }
 }

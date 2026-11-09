@@ -61,6 +61,11 @@ public class WebData {
     
     private func consumeJSON(_ data: Data) {
         
+        // Foundation's JSON parsers recurse once per nesting level, so a deeply nested body can
+        // overflow a worker thread's stack. Such a body is ignored, like any other unreadable one,
+        // and is not kept for object(_:) either.
+        guard JSONBodyLimits.nestingExceedsLimit(data) == false else { return }
+        
         jsonBody = data
         guard let obj = try? JSONSerialization.jsonObject(with: data),
               let dict = obj as? [String: Any]
@@ -70,6 +75,14 @@ public class WebData {
             wVarTransaction = wVar
         }
         
+        // Flattened keys repeat their parent's path and array values are descriptions, so a
+        // hostile body could expand many times over. Measure what flattening would copy first: a
+        // body over the limit keeps no fields at all, the same way on every run, and is still
+        // available to object(_:) and webVariableTransaction().
+        let flattenLimit = JSONFlattenBudget.limit(forBodyBytes: data.count)
+        guard JSONFlattenBudget.flattenedSize(of: dict, limit: flattenLimit) <= flattenLimit else { return }
+
+        // Keep these cases in step with JSONFlattenBudget.flattenedSize.
         func flatten(_ dict: [String: Any], prefix: String? = nil) {
             for (key, value) in dict {
                 let fullKey = prefix.map { "\($0).\(key)" } ?? key
@@ -110,83 +123,21 @@ public class WebData {
         }
     }
     
-    // MARK: - In-memory multipart (kept as-is for small requests)
+    // MARK: - In-memory multipart
+    // Parsing is bounds-checked and capped (see MultipartParser); hostile bodies yield fewer parts, never a trap.
     private func consumeMultipart(_ data: Data, boundary: String) {
-        let boundaryPrefix = "--" + boundary
-        let boundaryData = boundaryPrefix.data(using: .utf8)!
-        let endBoundaryData = ("\r\n" + boundaryPrefix).data(using: .utf8)!
-        
-        var idx = 0
-        
-        while idx < data.count {
-            guard let startRange = data.range(of: boundaryData, options: [], in: idx..<data.count) else { break }
-            idx = startRange.upperBound
-            
-            // Skip leading CRLF
-            if data[idx..<min(idx + 2, data.count)] == "\r\n".data(using: .utf8)! {
-                idx += 2
-            }
-            
-            // Find header/body separator
-            guard let headerEndRange = data.range(of: "\r\n\r\n".data(using: .utf8)!,
-                                                  options: [], in: idx..<data.count) else { break }
-            
-            let headerData = data[idx..<headerEndRange.lowerBound]
-            idx = headerEndRange.upperBound
-            
-            // Find end of this part
-            guard let partEndRange = data.range(of: endBoundaryData, options: [], in: idx..<data.count) else {
-                break
-            }
-            
-            let partData = data[idx..<partEndRange.lowerBound]
-            idx = partEndRange.lowerBound
-            
-            // Parse headers
-            guard let headerText = String(data: headerData, encoding: .utf8) else { continue }
-            var fieldName: String?
-            var fileName: String?
-            var contentType: String?
-            
-            for line in headerText.split(separator: "\r\n") {
-                let header = String(line)
-                if header.lowercased().hasPrefix("content-disposition:") {
-                    let parts = header.split(separator: ";").map { $0.trimmingCharacters(in: .whitespaces) }
-                    for p in parts {
-                        if p.hasPrefix("name=") {
-                            fieldName = p.split(separator: "=", maxSplits: 1)[1]
-                                .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-                        } else if p.hasPrefix("filename=") {
-                            fileName = p.split(separator: "=", maxSplits: 1)[1]
-                                .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-                        }
-                    }
-                } else if header.lowercased().hasPrefix("content-type:") {
-                    contentType = header.split(separator: ":", maxSplits: 1)[1]
-                        .trimmingCharacters(in: .whitespaces)
-                }
-            }
-            
-            guard let name = fieldName else { continue }
-            
-            if let fn = fileName {
-                // In-memory path (legacy)
-                files[name] = FilePart(fieldName: name, filename: fn, contentType: contentType, data: Data(partData))
-            } else if let text = String(data: partData, encoding: .utf8)?.trimmingCharacters(in: .newlines) {
-                combined[name] = text
+        for part in MultipartParser.parse(data, boundary: boundary) {
+            if let fn = part.filename {
+                // A repeated name (e.g. several "files[]") keeps the last part, as before.
+                files[part.name] = FilePart(fieldName: part.name, filename: fn, contentType: part.contentType, data: Data(part.body))
+            } else if let text = String(data: part.body, encoding: .utf8)?.trimmingCharacters(in: .newlines) {
+                combined[part.name] = text
             }
         }
     }
     
     private func boundary(from contentType: String) -> String? {
-        let components = contentType.split(separator: ";")
-        for comp in components {
-            let trimmed = comp.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("boundary=") {
-                return String(trimmed.dropFirst("boundary=".count))
-            }
-        }
-        return nil
+        return MultipartParser.boundary(fromContentType: contentType)
     }
     
     // MARK: – Accessors

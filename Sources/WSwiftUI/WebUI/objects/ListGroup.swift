@@ -102,7 +102,7 @@ public extension CoreWebEndpoint {
         if let v = variant { item.variant(v) }
         if active { item.active() }
         if disabled { item.disabled() }
-        item.innerHTML(title)
+        item.innerHTML(WebEscape.html(title))
         return item
     }
 }

@@ -48,15 +48,42 @@ public class WebVariableElement : WebElement {
         initial = value
     }
     
-    private func escapedForJSSingleQuotedString(_ value: String) -> String {
-        return value
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "'", with: "\\'")
-            .replacingOccurrences(of: "\n", with: "\\n")
-            .replacingOccurrences(of: "\r", with: "\\r")
-            .replacingOccurrences(of: "\t", with: "\\t")
+    /// Called when the variable is bound to a password input. The bound value must never be written into
+    /// the page, so the variable starts out empty: its definition script is rewritten with the empty value
+    /// of its type, and no initial value is synced on page load.
+    internal func redactInitialValue() {
+        let emptyValue: Any
+        switch variableType {
+            case .bool: emptyValue = false
+            case .int: emptyValue = 0
+            case .double: emptyValue = 0.0
+            case .string: emptyValue = ""
+            case .array: emptyValue = [String]()
+            case .object: emptyValue = [String: Any]()
+        }
+        setInitialValue(emptyValue)
+        // the definition is one line, `var <id> = <literal>;` (literals never contain a raw line break)
+        let definitionPrefix = "var \(builderId) = "
+        let definition = "\(definitionPrefix)\(asJSValue());"
+        var rewritten = false
+        attributes = attributes.compactMap { attribute in
+            switch attribute {
+                case .initialValue, .value:
+                    return nil
+                case .script(let js):
+                    guard rewritten == false, let start = js.range(of: definitionPrefix) else { return attribute }
+                    rewritten = true
+                    let end = js[start.lowerBound...].firstIndex(of: "\n") ?? js.endIndex
+                    return .script(js.replacingCharacters(in: start.lowerBound..<end, with: definition))
+                default:
+                    return attribute
+            }
+        }
     }
     
+    /// The variable's initial value as a JavaScript literal that is safe to embed in a `<script>` element
+    /// (strings are encoded with `WebJSON.scriptString`, so `</script>`, quotes, backticks, line
+    /// separators etc. can't break out of the literal or the script).
     @discardableResult
     internal func asJSValue() -> String {
         switch variableType {
@@ -65,20 +92,18 @@ public class WebVariableElement : WebElement {
         case .int:
             return String(asInt())
         case .double:
-            return String(asDouble())
+            // NaN / Infinity are emitted as JS identifiers rather than Swift's `nan` / `inf`
+            return ScriptValue.number(asDouble())
         case .string:
-            return "'\(escapedForJSSingleQuotedString(asString()))'"
+            return WebJSON.scriptString(asString())
         case .array:
-            let array = asArray().map { "'\(escapedForJSSingleQuotedString($0))'" }.joined(separator: ",")
+            let array = asArray().map { WebJSON.scriptString($0) }.joined(separator: ",")
             return "[\(array)]"
         case .object:
             // Assuming object is a dictionary of String: Any
-            if let dict = initial as? [String: Any] {
-                if JSONSerialization.isValidJSONObject(dict),
-                   let data = try? JSONSerialization.data(withJSONObject: dict, options: []),
-                   let json = String(data: data, encoding: .utf8) {
-                    return json
-                }
+            if let dict = initial as? [String: Any],
+               let json = WebJSON.scriptLiteral(any: dict) {
+                return ScriptValue.json(json)
             }
             return "{}"
         }
@@ -88,8 +113,25 @@ public class WebVariableElement : WebElement {
     internal func asArray() -> [String] {
         return initial as? [String] ?? []
     }
+    /// The bound value as display text for the server-side render (input `value`, bound `Text`, picker
+    /// selection). Strings are returned unchanged. Int/Double/Bool variables used to render as an empty
+    /// string until the client runtime synced them; they now render the same text the client shows
+    /// (`String(value)` in JS). Arrays and objects still render empty.
     internal func asString() -> String {
-        return initial as? String ?? ""
+        if let stringValue = initial as? String {
+            return stringValue
+        }
+        switch variableType {
+        case .bool:
+            return asBool() ? "true" : "false"
+        case .int:
+            return String(asInt())
+        case .double:
+            // exactly what JS `String(number)` shows after the client sync (no `.0`, `1e+21`, `0.00001`)
+            return ScriptValue.numberText(asDouble())
+        case .string, .array, .object:
+            return ""
+        }
     }
     internal func asInt() -> Int {
         return initial as? Int ?? 0
@@ -366,20 +408,21 @@ public class WebVariableElement : WebElement {
             }
         }
 
-        // Client-side descriptors (not sent)
-        let selfEntry = "{name:'\(nameSelf)',id:'\(builderId)',type:'\(typeString(variableType))'}"
+        // Client-side descriptors (not sent). Names come from `.name(...)` and are encoded as
+        // script-safe string literals.
+        let selfEntry = "{name:\(ScriptValue.string(nameSelf)),id:\(ScriptValue.string(builderId)),type:'\(typeString(variableType))'}"
         let relatedEntries = (related ?? []).map {
             let n = $0.internalName ?? $0.builderId
-            return "{name:'\(n)',id:'\($0.builderId)',type:'\(typeString($0.variableType))'}"
+            return "{name:\(ScriptValue.string(n)),id:\(ScriptValue.string($0.builderId)),type:'\(typeString($0.variableType))'}"
         }.joined(separator: ",")
 
         let varsArrayJS = "[\(selfEntry)\(relatedEntries.isEmpty ? "" : ",\(relatedEntries)")]"
 
         // internalName -> builderId for applying server responses
         let nameToIdMapJS: String = {
-            var pairs = ["'\(nameSelf)':'\(builderId)'"]
+            var pairs = ["\(ScriptValue.string(nameSelf)):\(ScriptValue.string(builderId))"]
             if let r = related {
-                pairs.append(contentsOf: r.map { "'\($0.internalName ?? $0.builderId)':'\($0.builderId)'" })
+                pairs.append(contentsOf: r.map { "\(ScriptValue.string($0.internalName ?? $0.builderId)):\(ScriptValue.string($0.builderId))" })
             }
             return "{\(pairs.joined(separator: ","))}"
         }()
@@ -419,7 +462,7 @@ public class WebVariableElement : WebElement {
 
             function buildPayload_\(builderId)(doRead, doWrite){
                 var payload = {
-                    reference: "\(reference)",
+                    reference: \(ScriptValue.string(reference)),
                     read: !!doRead,
                     write: !!doWrite,
                     data: {}
@@ -432,7 +475,7 @@ public class WebVariableElement : WebElement {
             }
 
             function doFetch_\(builderId)(payload){
-                return fetch("\(url)", {
+                return fetch(\(ScriptValue.string(url)), {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     credentials: "same-origin",

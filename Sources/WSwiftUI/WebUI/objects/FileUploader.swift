@@ -45,9 +45,9 @@ public extension WebFileUploaderElement {
     func extraFields(_ fields: [String: String]) -> Self {
         if !fields.isEmpty,
            let json = try? String(data: JSONEncoder().encode(fields), encoding: .utf8) {
-            // Escape quotes so it’s safe inside an HTML attribute
-            let escaped = json.replacingOccurrences(of: "\"", with: "&quot;")
-            addAttribute(.pair("data-extra", escaped))
+            // Pass the raw JSON: `.pair` values are HTML-escaped by the renderer, so escaping the
+            // quotes here as well would double-escape them and break `JSON.parse` on the client.
+            addAttribute(.pair("data-extra", json))
         }
         return self
     }
@@ -243,7 +243,7 @@ public extension CoreWebEndpoint {
     function runOnUpload(ctx) {
         try {
             (function(){
-                var upload = ctx; // <- your actions can read `upload`
+                var upload = ctx; // <- your actions can read upload
                 \(onUploadJS)
             })();
         } catch (e) {

@@ -53,7 +53,7 @@ public extension WebAudioElement {
     /// Sets the preload strategy ("none", "metadata", "auto")
     @discardableResult
     func preload(_ value: String) -> Self {
-        addAttribute(.custom("preload=\"\(value)\""))
+        addAttribute(.custom("preload=\"\(WebEscape.attribute(value))\""))
         return self
     }
 }

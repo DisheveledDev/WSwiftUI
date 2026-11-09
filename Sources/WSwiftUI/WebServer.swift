@@ -1,31 +1,8 @@
 import Foundation
 import Dispatch
 
-private extension HttpRequest {
-    var authenticationToken: String? {
-        get {
-            // check the headers for an authentication token
-            if let authHeader = self.head.headers.first(where: { $0.0.lowercased() == "authorization" })?.1 {
-                // strip the bearer part
-                let components = authHeader.split(separator: " ")
-                guard components.count == 2, components[0].lowercased() == "bearer" else {
-                    return nil
-                }
-                // return the token part
-                return String(components[1])
-            }
-            // check the query parameters
-            if let token = self.head.queryParams["token"] {
-                return token
-            }
-            // check cookies
-            if let cookie = self.cookies["auth"] {
-                return cookie
-            }
-            return nil
-        }
-    }
-}
+// Token extraction (Bearer header, opt-in ?token=, auth cookie) lives in
+// security/SessionCookie.swift: HttpRequest.authenticationCredential(acceptQueryToken:).
 
 public class WSwiftServer {
     
@@ -34,6 +11,13 @@ public class WSwiftServer {
     private var endpoints: [WebEndpoint] = []
     private let listenPort: Int
     public var publicBaseURL: String?
+    
+    /// When true, a `?token=` query parameter can authenticate a request (after a Bearer
+    /// header, before the auth cookie). It is never written into the session cookie.
+    /// Defaults to false: the query string is ignored for authentication, because a token
+    /// in a link can be planted by someone else and leaks into logs and Referer headers.
+    public var acceptQueryToken: Bool = false
+    
     public func register(_ newEndpoint: WebEndpoint) {
         
         let instance = newEndpoint.create()
@@ -50,18 +34,26 @@ public class WSwiftServer {
             var endpoint = newEndpoint.create()
             var grants: [String] = []
             
-            endpoint.authenticationIdentifier = request.authenticationToken
+            let credential = request.authenticationCredential(acceptQueryToken: self.acceptQueryToken)
+            endpoint.authenticationIdentifier = credential?.token
+            (endpoint as? CoreWebEndpoint)?.authenticationTokenSource = credential?.source ?? .none
             
             if endpoint.authenticationRequired.contains(.authenticated) {
-                if let token = request.authenticationToken, let authenticator = self.getUserRoles, let currentGrants = authenticator(token, endpoint) {
+                let rejected = { () -> HttpResponse in
+                    let response = HttpResponse().redirect(to: "/")
+                    // a rejected ?token= says nothing about the auth cookie, so it must not clear it
+                    if credential?.source != .queryParameter {
+                        response.clearCookie(name: SessionCookie.name)
+                    }
+                    return response
+                }
+                if let token = credential?.token, let authenticator = self.getUserRoles, let currentGrants = authenticator(token, endpoint) {
                     grants = currentGrants
                     if grants.isEmpty {
-                        return HttpResponse().redirect(to: "/")
-                            .clearCookie(name: "auth")
+                        return rejected()
                     }
                 } else {
-                    return HttpResponse().redirect(to: "/")
-                        .clearCookie(name: "auth")
+                    return rejected()
                 }
             }
             
@@ -235,10 +227,10 @@ public class WSwiftServer {
                             endpoint.applyPageSEO(seoEndpoint.seo(), baseURL: self.resolvedBaseURL(for: request), path: endpointPath)
                         }
                         let pageContent = endpoint.renderWebPage()
-                        return HttpResponse().status(.ok).content(.html).body(pageContent).setCookie(name: "auth", value: endpoint.newAuthenticationIdentifier ?? endpoint.authenticationIdentifier ?? "", path: "/", domain: nil, maxAge: 3600, expires: nil, httpOnly: true, secure: false, sameSite: "Lax")
+                        return SessionCookie.apply(to: HttpResponse().status(.ok).content(.html).body(pageContent), for: endpoint)
                     }
                 } else if let response = response as? Codable {
-                    return HttpResponse().status(.ok).content(.json).body(json: response).setCookie(name: "auth", value: endpoint.newAuthenticationIdentifier ?? endpoint.authenticationIdentifier ?? "", path: "/", domain: nil, maxAge: 3600, expires: nil, httpOnly: true, secure: false, sameSite: "Lax")
+                    return SessionCookie.apply(to: HttpResponse().status(.ok).content(.json).body(json: response), for: endpoint)
                 }
                 
                 return HttpResponse().status(.notFound)
@@ -277,9 +269,13 @@ public class WSwiftServer {
                 // Accept handshake
                 let response = HttpResponse().acceptWebSocket(key: upgrade.key, protocol: chosenProto)
 
-                // After the HTTP server writes 101, it will not close the fd; we launch the loop
-                DispatchQueue.global(qos: .userInitiated).async {
-                    wsEndpoint.startWebSocket(upgrade)
+                // Start the loop only once the 101 has been completely written: frames sent from
+                // onOpen can't reach the wire before the handshake, and if the 101 write fails the
+                // HTTP server closes the fd without the WebSocket side ever having touched it.
+                response.onUpgraded = {
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        wsEndpoint.startWebSocket(upgrade)
+                    }
                 }
 
                 return response
@@ -542,8 +538,23 @@ public class WSwiftServer {
     // instance vars
     private var svr: HTTPServer!
     
+    /// Dispatches a request through the registered routes without going through a socket.
+    /// Used by the test suite (and usable for in-process integration tests).
+    internal func respond(to request: HttpRequest) -> HttpResponse {
+        if let handler = self.svr.routeHandler(for: request.head.path) {
+            return handler(request)
+        }
+        return HttpResponse().status(.notFound).body("No endpoints configured.")
+    }
+    
     // action blocks
-    public init(port: Int, bindAddressv4: String? = nil, publicBaseURL: String? = nil) {
+    public convenience init(port: Int, bindAddressv4: String? = nil, publicBaseURL: String? = nil) {
+        self.init(port: port, bindAddressv4: bindAddressv4, publicBaseURL: publicBaseURL, autoStart: true)
+    }
+    
+    /// - Parameter autoStart: when `false` the listening socket is not opened; the test suite dispatches
+    ///   requests in process with `respond(to:)`.
+    internal init(port: Int, bindAddressv4: String?, publicBaseURL: String?, autoStart: Bool) {
         self.listenPort = port
         self.publicBaseURL = Self.normalizedBaseURL(publicBaseURL)
         
@@ -564,7 +575,9 @@ public class WSwiftServer {
         })
         
         registerSystemRoutes()
-        try? svr.start()
+        if autoStart {
+            try? svr.start()
+        }
 
     }
     

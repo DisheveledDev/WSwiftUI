@@ -84,13 +84,14 @@ public extension CoreWebEndpoint {
         return element
     }
 
-    /// Creates a `<button>` with Bootstrap classes
+    /// Creates a `<button>` with Bootstrap classes. `title` is plain text (HTML-escaped); to put markup inside the
+    /// button use `.innerHTML(...)` on the result.
     @discardableResult
     func Button(_ title: String, type buttonType: String = "button") -> WebButtonElement {
         let button = createButton { el in
             el.elementName = "button"
             el.addAttribute(.type(buttonType))
-            el.innerHTML(title)
+            el.innerHTML(WebEscape.html(title))
         }
         // default bootstrap btn base class
         button.default()

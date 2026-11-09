@@ -50,6 +50,19 @@ fileprivate extension WebElement {
             }
         }
     }
+    /// `true` for `<input type="password">`, however the type was set (`.type(...)` or `.pair("type", ...)`).
+    var isPasswordInput: Bool {
+        get {
+            guard elementName.lowercased() == "input" else { return false }
+            return attributes.contains { attr in
+                switch attr {
+                    case .type(let v): return WebHTMLSyntax.isPasswordType(v)
+                    case .pair(let k, let v): return k.lowercased() == "type" && WebHTMLSyntax.isPasswordType(v)
+                    default: return false
+                }
+            }
+        }
+    }
 }
 
 internal extension CoreWebEndpoint {
@@ -82,7 +95,7 @@ internal extension CoreWebEndpoint {
             pageContent += "\(tab)<script>\n"
             pageContent += "\(tab)\(tab)document.addEventListener('DOMContentLoaded', function() {\n"
             for script in domLoadedScripts {
-                pageContent += "\(tab)\(tab)\(tab)\(script)\n"
+                pageContent += "\(tab)\(tab)\(tab)\(WebJSON.scriptElementBody(script))\n"
             }
             pageContent += "\(tab)\(tab)});\n"
             pageContent += "\(tab)</script>\n"
@@ -121,25 +134,28 @@ internal extension CoreWebEndpoint {
                 case .style(let v):
                     styleValues.append(v)
                     
-                case .id(let v):           otherParts.append("id=\"\(v)\"")
-                case .name(let v):         otherParts.append("name=\"\(v)\"")
+                // All attribute values are HTML-escaped centrally here. Callers must pass raw (unescaped)
+                // values; `.custom(...)` is the only raw attribute escape hatch. Attribute *names* supplied by
+                // callers (`.pair`, `.data`) are stripped of characters that can't appear in a name.
+                case .id(let v):           otherParts.append("id=\"\(WebEscape.attribute(v))\"")
+                case .name(let v):         otherParts.append("name=\"\(WebEscape.attribute(v))\"")
                 case .value(let v):        value = v
-                case .type(let v):         otherParts.append("type=\"\(v)\"")
-                case .placeholder(let v):  otherParts.append("placeholder=\"\(v)\"")
+                case .type(let v):         otherParts.append("type=\"\(WebEscape.attribute(v))\"")
+                case .placeholder(let v):  otherParts.append("placeholder=\"\(WebEscape.attribute(v))\"")
                 case .required:            otherParts.append("required")
                 case .disabled:            otherParts.append("disabled")
                 case .readonly:            otherParts.append("readonly")
                 case .checked:             otherParts.append("checked")
                 case .selected:            otherParts.append("selected")
-                case .src(let v):          otherParts.append("src=\"\(v)\"")
-                case .href(let v):         otherParts.append("href=\"\(v)\"")
-                case .alt(let v):          otherParts.append("alt=\"\(v)\"")
-                case .title(let v):        otherParts.append("title=\"\(v)\"")
-                case .data(let key):       otherParts.append("data-\(key)")
+                case .src(let v):          otherParts.append("src=\"\(WebEscape.attribute(v))\"")
+                case .href(let v):         otherParts.append("href=\"\(WebEscape.attribute(v))\"")
+                case .alt(let v):          otherParts.append("alt=\"\(WebEscape.attribute(v))\"")
+                case .title(let v):        otherParts.append("title=\"\(WebEscape.attribute(v))\"")
+                case .data(let key):       otherParts.append(Self.dataAttribute(key))
                 case .custom(let s):       otherParts.append(s)
-                case .pair(let k, let v):  otherParts.append("\(k)=\"\(v)\"")
+                case .pair(let k, let v):  otherParts.append("\(WebHTMLSyntax.attributeName(k))=\"\(WebEscape.attribute(v))\"")
                 case .script(let js):      scripts.append(js)
-                case .innerHTML(let html): innerText = html
+                case .innerHTML(let html): innerText = html   // raw by design: controls escape their text before storing it
                 case .domLoadedScript(let script): domLoadedScripts.append(script)
                 case .item(_):
                     break;
@@ -182,10 +198,10 @@ internal extension CoreWebEndpoint {
                     // render all items as <option> elements
                     for item in subItems {
                         if case .item(let item) = item {
-                            var option = "<option value=\"\(item.value)\""
+                            var option = "<option value=\"\(WebEscape.attribute(item.value))\""
                             if item.isSelected || (boundValue != nil && item.value == boundValue) { option += " selected" }
                             if item.isDisabled { option += " disabled" }
-                            option += ">\(item.title)</option>"
+                            option += ">\(WebEscape.html(item.title))</option>"
                             items.append(option)
                         }
                     }
@@ -204,69 +220,40 @@ internal extension CoreWebEndpoint {
         if !classValues.isEmpty {
             // join with spaces
             let allClasses = classValues.joined(separator: " ")
-            parts.append("class=\"\(allClasses)\"")
+            parts.append("class=\"\(WebEscape.attribute(allClasses))\"")
         }
         if !styleValues.isEmpty {
             // merge multiple style strings with semicolons
             let allStyles = styleValues.joined(separator: ";")
-            parts.append("style=\"\(allStyles)\"")
+            parts.append("style=\"\(WebEscape.attribute(allStyles))\"")
         }
         
-        func escapedForJSString(_ value: String) -> String {
-            return value
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "'", with: "\\'")
-                .replacingOccurrences(of: "\n", with: "\\n")
-                .replacingOccurrences(of: "\r", with: "\\r")
-                .replacingOccurrences(of: "\t", with: "\\t")
-        }
-        
+        // Server -> JS values are always emitted as script-safe literals (see WebJSON).
         func jsLiteral(for raw: Any) -> String? {
-            if let v = raw as? Bool { return v ? "true" : "false" }
-            if let v = raw as? Int { return String(v) }
-            if let v = raw as? Double { return String(v) }
-            if let v = raw as? String { return "'\(escapedForJSString(v))'" }
-            if let v = raw as? [String],
-               let data = try? JSONSerialization.data(withJSONObject: v, options: []),
-               let json = String(data: data, encoding: .utf8) {
-                return json
-            }
-            if let v = raw as? [Int],
-               let data = try? JSONSerialization.data(withJSONObject: v, options: []),
-               let json = String(data: data, encoding: .utf8) {
-                return json
-            }
-            if let v = raw as? [String: String],
-               let data = try? JSONSerialization.data(withJSONObject: v, options: []),
-               let json = String(data: data, encoding: .utf8) {
-                return json
-            }
-            if let v = raw as? [String: Any],
-               JSONSerialization.isValidJSONObject(v),
-               let data = try? JSONSerialization.data(withJSONObject: v, options: []),
-               let json = String(data: data, encoding: .utf8) {
-                return json
-            }
-            return nil
+            return WebJSON.scriptLiteral(any: raw)
         }
+        
+        // A password input is never rendered with a value, whatever was bound or submitted, so a secret
+        // can't be echoed back into the page (e.g. when a form is re-rendered after failed validation).
+        let suppressValue = element.isPasswordInput
         
         if let initialValue = initialValue {
             // For variable-backed hidden inputs we rely on explicit `.value(...)`
             // attributes and use initialValue only for JS-side variable sync.
-            if !(element is WebVariableElement) {
-                parts.append("value=\"\(initialValue)\"")
+            if !(element is WebVariableElement) && !suppressValue {
+                parts.append("value=\"\(WebEscape.attribute("\(initialValue)"))\"")
             }
             if let initialLiteral = jsLiteral(for: initialValue) {
                 domLoadedScripts.append("if (typeof updateWebVariable\(element.builderId) === 'function') { updateWebVariable\(element.builderId)(\(initialLiteral), { source: 'initial' }); }")
             }
-        } else if let value = value {
-            parts.append("value=\"\(value)\"")
+        } else if let value = value, !suppressValue {
+            parts.append("value=\"\(WebEscape.attribute("\(value)"))\"")
         }
         parts.append(contentsOf: otherParts)
         
         // now compile an encoded set of validators
         if validators.isEmpty == false {
-            parts.append("validation=\" \( validators.map { $0.encoded }.joined(separator: ","))\"")
+            parts.append("validation=\" \(WebEscape.attribute(validators.map { $0.encoded }.joined(separator: ",")))\"")
         }
         
         // use an array of strings to build the result as efficiently as possible
@@ -274,7 +261,7 @@ internal extension CoreWebEndpoint {
         
         // check for a label to this element
         if let labelText = label {
-            result.append("\(indent)<label for=\"\(element.builderId)\">\(labelText)</label>\n")
+            result.append("\(indent)<label for=\"\(element.builderId)\">\(WebEscape.html(labelText))</label>\n")
         }
         
         // 3. open tag (no “>” or newline yet)
@@ -322,12 +309,12 @@ internal extension CoreWebEndpoint {
         
         // 4b.iii then any scripts
         for js in scripts {
-            result.append("\(childIndent)<script>\(js)</script>\n")
+            result.append("\(childIndent)<script>\(WebJSON.scriptElementBody(js))</script>\n")
         }
         
         // now see if there is an inline error message to show
         if let errorMessage = errorMessage {
-            result.append("\(childIndent)<div style=\"font-size: x-small; color: red;\">\(errorMessage)</div>\n")
+            result.append("\(childIndent)<div style=\"font-size: x-small; color: red;\">\(WebEscape.html(errorMessage))</div>\n")
         }
         
         // now see if there are any validation items, which may need to show an error message
@@ -343,35 +330,35 @@ internal extension CoreWebEndpoint {
     private func render(_ element: WebCoreHeadElement, indent: String) -> String {
         switch element {
             case .title(let text):
-                return "\(indent)<title>\(text)</title>\n"
+                return "\(indent)<title>\(WebEscape.html(text))</title>\n"
                 
             case .base(let href):
-                return "\(indent)<base href=\"\(href)\" />\n"
+                return "\(indent)<base href=\"\(WebEscape.attribute(href))\" />\n"
                 
                 // MARK: Meta tags
             case .metaCharset(let charset):
-                return "\(indent)<meta charset=\"\(charset)\" />\n"
+                return "\(indent)<meta charset=\"\(WebEscape.attribute(charset))\" />\n"
                 
             case .metaHttpEquiv(let httpEquiv, let content):
-                return "\(indent)<meta http-equiv=\"\(httpEquiv)\" content=\"\(content)\" />\n"
+                return "\(indent)<meta http-equiv=\"\(WebEscape.attribute(httpEquiv))\" content=\"\(WebEscape.attribute(content))\" />\n"
                 
             case .metaName(let name, let content):
-                return "\(indent)<meta name=\"\(name)\" content=\"\(content)\" />\n"
+                return "\(indent)<meta name=\"\(WebEscape.attribute(name))\" content=\"\(WebEscape.attribute(content))\" />\n"
                 
             case .metaProperty(let prop, let content):
-                return "\(indent)<meta property=\"\(prop)\" content=\"\(content)\" />\n"
+                return "\(indent)<meta property=\"\(WebEscape.attribute(prop))\" content=\"\(WebEscape.attribute(content))\" />\n"
                 
             case .metaViewport(let content):
-                return "\(indent)<meta name=\"viewport\" content=\"\(content)\" />\n"
+                return "\(indent)<meta name=\"viewport\" content=\"\(WebEscape.attribute(content))\" />\n"
                 
             case .metaThemeColor(let color):
-                return "\(indent)<meta name=\"theme-color\" content=\"\(color)\" />\n"
+                return "\(indent)<meta name=\"theme-color\" content=\"\(WebEscape.attribute(color))\" />\n"
                 
             case .metaDescription(let desc):
-                return "\(indent)<meta name=\"description\" content=\"\(desc)\" />\n"
+                return "\(indent)<meta name=\"description\" content=\"\(WebEscape.attribute(desc))\" />\n"
                 
             case .metaApplicationName(let name):
-                return "\(indent)<meta name=\"application-name\" content=\"\(name)\" />\n"
+                return "\(indent)<meta name=\"application-name\" content=\"\(WebEscape.attribute(name))\" />\n"
                 
             case .metaMobileWebAppCapable(let capable):
                 let val = capable ? "yes" : "no"
@@ -379,48 +366,66 @@ internal extension CoreWebEndpoint {
                 
                 // MARK: Link tags
             case .link(let rel, let href, let type, let sizes, let color, let attrs):
-                var parts: [String] = ["rel=\"\(rel.stringValue)\"", "href=\"\(href)\""]
-                if let t = type        { parts.append("type=\"\(t)\"") }
-                if let s = sizes       { parts.append("sizes=\"\(s)\"") }
-                if let c = color       { parts.append("color=\"\(c)\"") }
+                var parts: [String] = ["rel=\"\(WebEscape.attribute(rel.stringValue))\"", "href=\"\(WebEscape.attribute(href))\""]
+                if let t = type        { parts.append("type=\"\(WebEscape.attribute(t))\"") }
+                if let s = sizes       { parts.append("sizes=\"\(WebEscape.attribute(s))\"") }
+                if let c = color       { parts.append("color=\"\(WebEscape.attribute(c))\"") }
                 if let extra = attrs {
-                    for (k,v) in extra { parts.append("\(k)=\"\(v)\"") }
+                    for (k,v) in extra { parts.append("\(WebHTMLSyntax.attributeName(k))=\"\(WebEscape.attribute(v))\"") }
                 }
                 return "\(indent)<link \(parts.joined(separator: " ")) />\n"
                 
                 // MARK: Scripts & Styles
             case .script(let src, let async, let `defer`, let type, let integrity, let crossOrigin, let attributes):
-                var parts: [String] = ["src=\"\(src)\""]
+                var parts: [String] = ["src=\"\(WebEscape.attribute(src))\""]
                 if async               { parts.append("async") }
                 if `defer`             { parts.append("defer") }
-                if let t = type        { parts.append("type=\"\(t)\"") }
-                if let i = integrity   { parts.append("integrity=\"\(i)\"") }
-                if let co = crossOrigin{ parts.append("crossorigin=\"\(co)\"") }
+                if let t = type        { parts.append("type=\"\(WebEscape.attribute(t))\"") }
+                if let i = integrity   { parts.append("integrity=\"\(WebEscape.attribute(i))\"") }
+                if let co = crossOrigin{ parts.append("crossorigin=\"\(WebEscape.attribute(co))\"") }
                 if let extra = attributes {
-                    for (k,v) in extra { parts.append("\(k)=\"\(v)\"") }
+                    for (k,v) in extra { parts.append("\(WebHTMLSyntax.attributeName(k))=\"\(WebEscape.attribute(v))\"") }
                 }
                 return "\(indent)<script \(parts.joined(separator: " "))></script>\n"
                 
+            // Inline script/style bodies, and the tag name + inner HTML of `.custom`, are raw by design
+            // (trusted, developer-supplied code). Every attribute value in the head is escaped.
             case .inlineScript(let code):
-                return "\(indent)<script>\n\(indent)\(tab)\(code)\n\(indent)</script>\n"
+                return "\(indent)<script>\n\(indent)\(tab)\(WebJSON.scriptElementBody(code))\n\(indent)</script>\n"
                 
             case .styleLink(let href):
-                return "\(indent)<link rel=\"stylesheet\" href=\"\(href)\" />\n"
+                return "\(indent)<link rel=\"stylesheet\" href=\"\(WebEscape.attribute(href))\" />\n"
                 
             case .inlineStyle(let css):
                 return "\(indent)<style>\n\(indent)\(tab)\(css)\n\(indent)</style>\n"
                 
                 // MARK: Comment & Custom
             case .comment(let text):
-                return "\(indent)<!-- \(text) -->\n"
+                return "\(indent)<!-- \(WebHTMLSyntax.commentText(text)) -->\n"
                 
             case .custom(let tag, let attributes, let innerHTML):
-                let attrs = attributes.map { "\($0)=\"\($1)\"" }.joined(separator: " ")
+                let attrs = attributes.map { "\(WebHTMLSyntax.attributeName($0))=\"\(WebEscape.attribute($1))\"" }.joined(separator: " ")
                 if let inner = innerHTML {
                     return "\(indent)<\(tag) \(attrs)>\(inner)</\(tag)>\n"
                 } else {
                     return "\(indent)<\(tag) \(attrs) />\n"
                 }
         }
+    }
+}
+
+extension CoreWebEndpoint {
+    /// Renders `.data(_:)`: `"name"` gives `data-name`, and `"name=value"` (the value optionally quoted, as
+    /// callers wrote it before escaping was central) gives `data-name="value"` with the value escaped.
+    static func dataAttribute(_ raw: String) -> String {
+        guard let eq = raw.firstIndex(of: "=") else {
+            return "data-\(WebHTMLSyntax.attributeName(raw))"
+        }
+        let name = WebHTMLSyntax.attributeName(String(raw[..<eq]).trimmingCharacters(in: .whitespaces))
+        var value = Substring(raw[raw.index(after: eq)...].trimmingCharacters(in: .whitespaces))
+        if value.count >= 2, let quote = value.first, quote == "\"" || quote == "'", value.last == quote {
+            value = value.dropFirst().dropLast()
+        }
+        return "data-\(name)=\"\(WebEscape.attribute(String(value)))\""
     }
 }

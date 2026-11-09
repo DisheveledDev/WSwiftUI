@@ -77,7 +77,7 @@ internal extension CoreWebEndpoint {
         }
         
         for document in config.jsonLD where document.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
-            head(.custom(tag: "script", attributes: ["type":"application/ld+json"], innerHTML: document))
+            head(.custom(tag: "script", attributes: ["type":"application/ld+json"], innerHTML: WebJSON.makeScriptSafe(document)))
         }
     }
     

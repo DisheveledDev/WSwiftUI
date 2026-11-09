@@ -14,7 +14,7 @@ public extension CoreWebEndpoint {
     /// Factory to create and register a WebLinkElement with the endpoint.
     /// - Parameters:
     ///   - href: URL string for the link.
-    ///   - title: Text content of the link.
+    ///   - title: Text content of the link (plain text, HTML-escaped).
     ///   - target: Optional target attribute (e.g., "_blank").
     /// - Returns: Configured WebLinkElement.
     @discardableResult
@@ -30,7 +30,7 @@ public extension CoreWebEndpoint {
                 if let t = target {
                     el.addAttribute(.pair("target", t))
                 }
-                el.addAttribute(.innerHTML(title))
+                el.addAttribute(.innerHTML(WebEscape.html(title)))
             }
         }
         

@@ -59,7 +59,7 @@ public extension CoreWebEndpoint {
     a.elementName = "a"
     a.addAttribute(.dontRegisterObject)
     a.addAttribute(.pair("href", url))
-    a.innerHTML(title)
+    a.innerHTML(WebEscape.html(title))
     
     // pop <li>
     stack.removeLast()

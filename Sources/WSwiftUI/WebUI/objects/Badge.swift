@@ -76,7 +76,7 @@ public extension CoreWebEndpoint {
         if linkStyle {
             badge.addAttribute(.class("text-decoration-none"))
         }
-        badge.innerHTML(title)
+        badge.innerHTML(WebEscape.html(title))
         return badge
     }
 }

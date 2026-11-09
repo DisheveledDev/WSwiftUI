@@ -206,6 +206,10 @@ public final class HttpRequest {
         case .inMemory(let d):
             data = d
         }
+        // JSONDecoder recurses once per nesting level; refuse hostile depth instead of overflowing the stack
+        guard JSONBodyLimits.nestingExceedsLimit(data) == false else {
+            throw Err.parse("JSON nested too deeply")
+        }
         return try decoder.decode(type, from: data)
     }
 }
@@ -217,13 +221,40 @@ public final class HttpResponse {
     public private(set) var bodyBytes: Data = Data()
     public private(set) var bodyFileUrl: URL?
     public private(set) var bodyFileHandleRange: Range<Int>?
+    /// Runs after a 101 response has been completely written. From then on the socket
+    /// belongs to whatever the hook starts; the HTTP server never touches it again.
+    /// It never runs when the 101 could not be written (the server then closes the socket).
+    ///
+    /// Start a WebSocket loop (`CoreWebsocketEndpoint.startWebSocket(_:)` or
+    /// `WebSocketConnection(fd:)`) from this hook, never directly from the route handler:
+    /// before the 101 is on the wire the descriptor still belongs to the HTTP server.
+    /// The hook runs synchronously on the HTTP worker thread, so dispatch long-running work
+    /// to another queue, as `WSwiftServer.registerWebSocket` does.
+    public var onUpgraded: (() -> Void)?
     
     public init() {}
     
     // Fluent
     @discardableResult public func status(_ s: HttpStatus) -> Self { self.status = s; return self }
-    @discardableResult public func header(_ k: String, _ v: String) -> Self { headers.append((k, v)); return self }
-    @discardableResult public func headers(_ items: [(String,String)]) -> Self { headers.append(contentsOf: items); return self }
+    /// Adds a header. A header whose name is not an RFC 7230 token, or whose value contains
+    /// CR, LF or NUL, would let the value split the response, so it is dropped (and logged).
+    @discardableResult public func header(_ k: String, _ v: String) -> Self {
+        guard HTTPHeaderValidation.isToken(k) else {
+            HTTPHeaderValidation.logDropped("response header", name: k, reason: "name is not an RFC 7230 token")
+            return self
+        }
+        guard HTTPHeaderValidation.isSafeFieldValue(v) else {
+            HTTPHeaderValidation.logDropped("response header", name: k, reason: "value contains CR, LF or NUL")
+            return self
+        }
+        headers.append((k, v))
+        return self
+    }
+    /// Adds each header with the same rules as `header(_:_:)`.
+    @discardableResult public func headers(_ items: [(String,String)]) -> Self {
+        for (k, v) in items { header(k, v) }
+        return self
+    }
     
     public enum ImageType {
         case jpg
@@ -290,22 +321,47 @@ public final class HttpResponse {
         return self
     }
     
+    /// Streams `file` as the body without reading it into memory.
+    /// With `from` and `to` (byte offsets, `to` exclusive) only that range is sent, as
+    /// 206 Partial Content with a Content-Range header; a range that does not overlap the
+    /// file is answered 416 when the response is written. Content-Length is always set
+    /// from the file's size (or the range length) when the response is written, and a
+    /// missing or unreadable file is answered 404.
     @discardableResult public func body(_ file: URL, from: Int? = nil, to: Int? = nil) -> Self {
         // we will pass the file URL directly for super efficient streaming of binary data so it doesn't have to be read into memory before transmission
         self.bodyFileUrl = file
         if let from, let to {
-            self.bodyFileHandleRange = from..<to
+            // `from..<to` traps when to < from; store an empty range instead, which is answered 416
+            self.bodyFileHandleRange = to >= from ? from..<to : from..<from
         }
         return self
     }
     
     // Cookies
+    /// Adds a Set-Cookie header. The cookie is not emitted (and the drop is logged) unless
+    /// `name` is an RFC 7230 token, `value` is made of RFC 6265 cookie-octets (optionally
+    /// wrapped in double quotes; empty is allowed), and `path`, `domain` and `sameSite`
+    /// contain no ';' and no control characters.
     @discardableResult public func setCookie(
         name: String, value: String,
         path: String = "/", domain: String? = nil,
         maxAge: Int? = nil, expires: Date? = nil,
         httpOnly: Bool = true, secure: Bool = false, sameSite: String? = "Lax"
     ) -> Self {
+        guard HTTPHeaderValidation.isToken(name) else {
+            HTTPHeaderValidation.logDropped("cookie", name: name, reason: "name is not an RFC 7230 token")
+            return self
+        }
+        guard HTTPHeaderValidation.isCookieValue(value) else {
+            HTTPHeaderValidation.logDropped("cookie", name: name, reason: "value is not made of RFC 6265 cookie-octets")
+            return self
+        }
+        guard HTTPHeaderValidation.isSafeCookieAttribute(path),
+              domain.map(HTTPHeaderValidation.isSafeCookieAttribute) ?? true,
+              sameSite.map(HTTPHeaderValidation.isSafeCookieAttribute) ?? true else {
+            HTTPHeaderValidation.logDropped("cookie", name: name, reason: "Path, Domain or SameSite contains ';', a control character or non-ASCII text")
+            return self
+        }
         var parts = ["\(name)=\(value)"]
         parts.append("Path=\(path)")
         if let d = domain { parts.append("Domain=\(d)") }
@@ -320,8 +376,7 @@ public final class HttpResponse {
         if httpOnly { parts.append("HttpOnly") }
         if secure { parts.append("Secure") }
         if let ss = sameSite { parts.append("SameSite=\(ss)") }
-        headers.append(("Set-Cookie", parts.joined(separator: "; ")))
-        return self
+        return header("Set-Cookie", parts.joined(separator: "; "))
     }
     
     @discardableResult public func clearCookie(name: String, path: String = "/", domain: String? = nil) -> Self {
@@ -329,6 +384,8 @@ public final class HttpResponse {
         return setCookie(name: name, value: "", path: path, domain: domain, maxAge: 0, expires: past, httpOnly: true, secure: false, sameSite: "Lax")
     }
     
+    /// Sets a 301/302 status and a Location header. A `url` containing CR, LF or NUL is
+    /// not written: the Location header is dropped (and logged), as for `header(_:_:)`.
     @discardableResult public func redirect(to url: String, permanent: Bool = false) -> Self {
         self.status = permanent ? HttpStatus(301, "Moved Permanently") : HttpStatus(302, "Found")
         _ = header("Location", url)
@@ -513,6 +570,9 @@ public enum WebSocketOpcode: UInt8, Sendable {
     case ping        = 0x9
     case pong        = 0xA
     // 0xB-0xF reserved
+
+    /// Control frames (close, ping, pong) have the high bit of the opcode set.
+    internal var isControl: Bool { (rawValue & 0x08) != 0 }
 }
 
 public struct WebSocketFrame: Sendable {
@@ -520,7 +580,7 @@ public struct WebSocketFrame: Sendable {
     public var opcode: WebSocketOpcode
     public var payload: Data
     public var maskingKey: UInt32? // network-order key if present
-    
+
     public init(fin: Bool, opcode: WebSocketOpcode, payload: Data = Data(), maskingKey: UInt32? = nil) {
         self.fin = fin
         self.opcode = opcode
@@ -529,45 +589,193 @@ public struct WebSocketFrame: Sendable {
     }
 }
 
+/// A server-side WebSocket connection on an already-upgraded socket.
+///
+/// Reading follows RFC 6455 section 5 and enforces size limits before reading or
+/// allocating a payload. When the peer breaks the protocol, `readMessage()` sends a
+/// Close frame (1002 protocol error, 1007 invalid UTF-8, or 1009 too big), shuts the
+/// socket down, and throws `WebSocketProtocolError`.
+///
+/// Threading: `readMessage()` / `run(handle:)` must be driven by one reader thread.
+/// The `send*`, `close(code:reason:)` and `closeSocket()` methods may be called from any
+/// thread. `closeSocket()` is idempotent and never closes the descriptor while a read or
+/// write of this connection is still using it, so this connection closes the descriptor
+/// exactly once and never reads or writes it after closing it.
+///
+/// Ownership: those guarantees hold only while this connection is the descriptor's sole
+/// owner. Create it only after the HTTP 101 response has been completely written, and from
+/// then on release the descriptor only through `closeSocket()`. If other code still writes
+/// to or closes the same descriptor number (for example an HTTP thread that has not yet
+/// written the 101), the number can be closed early and handed to another client by
+/// `accept()`, and the two connections then read and write each other's bytes.
 public final class WebSocketConnection: @unchecked Sendable {
+
+    /// Default largest payload accepted in one frame (1 MiB).
+    public static let defaultMaxFrameBytes = 1 << 20
+    /// Default largest message accepted after reassembling fragments (1 MiB).
+    public static let defaultMaxMessageBytes = 1 << 20
+    /// Payloads are read from the socket in slices of at most this many bytes.
+    internal static let readSliceBytes = 64 * 1024
 
     internal var endpoint: CoreWebsocketEndpoint?
     public let fd: Int32
-    private let writeLock = NSLock()
-    public private(set) var isClosed: Bool = false
 
-    public init(fd: Int32) {
+    /// Serializes whole frames on the wire.
+    private let writeLock = NSLock()
+    /// Guards the state below. Never held across a blocking system call.
+    private let stateLock = NSLock()
+    private var closedForWriting = false
+    private var closeFrameSent = false
+    private var fdCloseRequested = false
+    private var fdReleased = false
+    private var releaseCount = 0
+    private var activeIO = 0
+    private var frameLimit: Int
+    private var messageLimit: Int
+    private var peerCloseCode: UInt16?
+    private var peerCloseReason: String?
+
+    // Fragmented message in progress. Touched only by the reader thread.
+    private var partialOpcode: WebSocketOpcode?
+    private var partialPayload = Data()
+
+    /// - Parameters:
+    ///   - maxFrameBytes: largest data-frame payload accepted; larger frames are refused with close 1009.
+    ///   - maxMessageBytes: largest message accepted after reassembling fragments; larger ones get close 1009.
+    public init(fd: Int32,
+                maxFrameBytes: Int = WebSocketConnection.defaultMaxFrameBytes,
+                maxMessageBytes: Int = WebSocketConnection.defaultMaxMessageBytes) {
         self.fd = fd
+        self.frameLimit = max(0, maxFrameBytes)
+        self.messageLimit = max(0, maxMessageBytes)
     }
 
     deinit {
         // no implicit close; caller owns lifecycle
     }
 
-    /// Mark this connection as closed (prevents further writes)
-    internal func markClosed() {
-        writeLock.lock()
-        isClosed = true
-        writeLock.unlock()
+    @inline(__always)
+    private func locked<T>(_ body: () throws -> T) rethrows -> T {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return try body()
     }
 
-    /// Safely close the underlying file descriptor
+    /// True once the connection will send nothing more: a Close frame went out, the
+    /// peer went away, a protocol error occurred, or `closeSocket()` was called.
+    public var isClosed: Bool { locked { closedForWriting } }
+
+    /// Largest data-frame payload accepted, in bytes. Settable per connection, from any thread.
+    public var maxFrameBytes: Int {
+        get { locked { frameLimit } }
+        set { locked { frameLimit = max(0, newValue) } }
+    }
+
+    /// Largest message accepted after reassembling fragments, in bytes. Settable per connection.
+    public var maxMessageBytes: Int {
+        get { locked { messageLimit } }
+        set { locked { messageLimit = max(0, newValue) } }
+    }
+
+    /// The status code from the peer's Close frame, once one has been received.
+    public var receivedCloseCode: UInt16? { locked { peerCloseCode } }
+
+    /// The reason from the peer's Close frame, if it sent a non-empty one.
+    public var receivedCloseReason: String? { locked { peerCloseReason } }
+
+    /// True once the descriptor itself has been closed (for tests).
+    internal var isDescriptorReleased: Bool { locked { fdReleased } }
+
+    /// How many times this connection has called close() on its descriptor; never more
+    /// than 1 (for tests, which cannot rely on the freed number being reused).
+    internal var descriptorReleaseCount: Int { locked { releaseCount } }
+
+    /// Mark this connection as closed (prevents further writes)
+    internal func markClosed() {
+        locked { closedForWriting = true }
+    }
+
+    /// Closes the socket. Safe to call more than once and from any thread.
+    ///
+    /// The first call stops all writes and closes the descriptor straight away when no
+    /// read or write is in progress. Otherwise it shuts the socket down, which wakes the
+    /// blocked reader or writer, and the last of them closes the descriptor on its way
+    /// out. Later calls do nothing, so the descriptor number is closed exactly once.
     public func closeSocket() {
-        markClosed()
+        stateLock.lock()
+        closedForWriting = true
+        if fdCloseRequested {
+            stateLock.unlock()
+            return
+        }
+        fdCloseRequested = true
+        let closeNow = activeIO == 0
+        if closeNow {
+            fdReleased = true
+        } else {
+            // The descriptor is still open (a reader/writer holds it), so this cannot
+            // touch a reused number. shutdown() does not block.
+            _ = shutdown(fd, Int32(SHUT_RDWR))
+        }
+        stateLock.unlock()
+        if closeNow { releaseDescriptor() }
+    }
+
+    /// Closes the descriptor. Callers set `fdReleased` under the state lock first, so only
+    /// one caller ever gets here.
+    private func releaseDescriptor() {
+        locked { releaseCount += 1 }
 #if os(Linux)
-        Glibc.close(fd)
+        _ = Glibc.close(fd)
 #else
-        Darwin.close(fd)
+        _ = Darwin.close(fd)
 #endif
+    }
+
+    /// Stops writes and shuts the socket down (TCP FIN) without releasing the descriptor,
+    /// which stays with the owner until `closeSocket()`.
+    private func shutdownSocket() {
+        locked {
+            closedForWriting = true
+            if !fdReleased {
+                _ = shutdown(fd, Int32(SHUT_RDWR))
+            }
+        }
     }
 
     // MARK: - I/O primitives
 
+    /// Registers a read or write on the descriptor; fails once `closeSocket()` was called.
+    private func beginIO() -> Bool {
+        return locked {
+            if fdCloseRequested { return false }
+            activeIO += 1
+            return true
+        }
+    }
+
+    private func endIO() {
+        let closeNow: Bool = locked {
+            activeIO -= 1
+            if fdCloseRequested && activeIO == 0 && !fdReleased {
+                fdReleased = true
+                return true
+            }
+            return false
+        }
+        if closeNow { releaseDescriptor() }
+    }
+
+    /// Reads exactly `count` bytes. Callers check `count` against the limits first; the
+    /// buffer still grows only as bytes actually arrive, at most 64 KiB per read.
     private func readExact(_ count: Int) throws -> Data {
+        guard count > 0 else { return Data() }
+        guard beginIO() else { throw Err.closed }
+        defer { endIO() }
         var remaining = count
         var out = Data()
-        out.reserveCapacity(count)
-        var buf = [UInt8](repeating: 0, count: min(64 * 1024, max(1024, count)))
+        out.reserveCapacity(min(count, Self.readSliceBytes))
+        var buf = [UInt8](repeating: 0, count: min(count, Self.readSliceBytes))
         while remaining > 0 {
             let toRead = min(buf.count, remaining)
             let r = buf.withUnsafeMutableBytes { p in
@@ -577,8 +785,9 @@ public final class WebSocketConnection: @unchecked Sendable {
             if r < 0 {
                 let e = errno
                 if e == EINTR { continue }
+                let message = errnoString("ws read")
                 markClosed()
-                throw Err.io(errnoString("ws read"))
+                throw Err.io(message)
             }
             out.append(contentsOf: buf[0..<r])
             remaining -= r
@@ -586,21 +795,34 @@ public final class WebSocketConnection: @unchecked Sendable {
         return out
     }
 
-    private func writeAll(_ data: Data) throws {
-        if isClosed { throw Err.closed }
+    /// Writes all of `data`. With `nonBlocking`, gives up instead of waiting for buffer space.
+    private func writeAll(_ data: Data, nonBlocking: Bool = false) throws {
+        guard !data.isEmpty else { return }
+        guard beginIO() else { throw Err.closed }
+        defer { endIO() }
         try data.withUnsafeBytes { (p: UnsafeRawBufferPointer) in
-            var base = p.baseAddress!
+            guard var base = p.baseAddress else { return }
             var remaining = p.count
             while remaining > 0 {
-                let w = write(fd, base, remaining)
+                let w: Int
+                if nonBlocking {
+#if os(Linux)
+                    w = Glibc.send(fd, base, remaining, Int32(MSG_DONTWAIT))
+#else
+                    w = Darwin.send(fd, base, remaining, Int32(MSG_DONTWAIT))
+#endif
+                } else {
+                    w = write(fd, base, remaining)
+                }
                 if w < 0 {
                     let e = errno
                     if e == EINTR { continue }
+                    let message = errnoString("ws write")
                     markClosed()
                     if e == EPIPE || e == ECONNRESET {
                         throw Err.closed
                     }
-                    throw Err.io(errnoString("ws write"))
+                    throw Err.io(message)
                 }
                 if w == 0 { markClosed(); throw Err.closed }
                 remaining -= w
@@ -608,54 +830,46 @@ public final class WebSocketConnection: @unchecked Sendable {
             }
         }
     }
-    
+
     // MARK: - Framing
-    
+
     private func unmask(_ data: inout Data, key: UInt32) {
-        var k = key
+        let maskBytes: [UInt8] = [UInt8(key >> 24), UInt8((key >> 16) & 0xFF),
+                                  UInt8((key >> 8) & 0xFF), UInt8(key & 0xFF)]
         data.withUnsafeMutableBytes { (p: UnsafeMutableRawBufferPointer) in
             guard let base = p.baseAddress else { return }
-            var ptr = base.assumingMemoryBound(to: UInt8.self)
-            let count = p.count
-            for i in 0..<count {
-                let j = i & 3
-                let shift = (3 - j) * 8
-                let maskByte = UInt8((k >> shift) & 0xFF)
-                ptr[i] ^= maskByte
+            let ptr = base.assumingMemoryBound(to: UInt8.self)
+            for i in 0..<p.count {
+                ptr[i] ^= maskBytes[i & 3]
             }
         }
     }
-    
+
     private func serialize(frame: WebSocketFrame, mask: Bool = false) -> Data {
         var out = Data()
         let finBit: UInt8 = frame.fin ? 0x80 : 0x00
         let opcodeNibble: UInt8 = frame.opcode.rawValue & 0x0F
-        var b0 = finBit | opcodeNibble
-        withUnsafeBytes(of: &b0) { out.append($0.bindMemory(to: UInt8.self).baseAddress!, count: 1) }
-        
-        var payload = frame.payload
-        var maskBit: UInt8 = mask ? 0x80 : 0x00
+        out.append(finBit | opcodeNibble)
+
+        let payload = frame.payload
+        let maskBit: UInt8 = mask ? 0x80 : 0x00
         let len = payload.count
         if len <= 125 {
-            var bLen = maskBit | UInt8(len)
-            withUnsafeBytes(of: &bLen) { out.append($0.bindMemory(to: UInt8.self).baseAddress!, count: 1) }
+            out.append(maskBit | UInt8(len))
         } else if len <= 0xFFFF {
-            var b126 = maskBit | 126
-            withUnsafeBytes(of: &b126) { out.append($0.bindMemory(to: UInt8.self).baseAddress!, count: 1) }
+            out.append(maskBit | 126)
             var be = UInt16(len).bigEndian
-            withUnsafeBytes(of: &be) { out.append($0.bindMemory(to: UInt8.self).baseAddress!, count: 2) }
+            withUnsafeBytes(of: &be) { out.append(contentsOf: $0) }
         } else {
-            var b127 = maskBit | 127
-            withUnsafeBytes(of: &b127) { out.append($0.bindMemory(to: UInt8.self).baseAddress!, count: 1) }
+            out.append(maskBit | 127)
             var be = UInt64(len).bigEndian
-            withUnsafeBytes(of: &be) { out.append($0.bindMemory(to: UInt8.self).baseAddress!, count: 8) }
+            withUnsafeBytes(of: &be) { out.append(contentsOf: $0) }
         }
-        
-        var maskingKey: UInt32 = 0
+
         if mask {
-            maskingKey = frame.maskingKey ?? UInt32.random(in: UInt32.min...UInt32.max)
+            let maskingKey = frame.maskingKey ?? UInt32.random(in: UInt32.min...UInt32.max)
             var be = maskingKey.bigEndian
-            withUnsafeBytes(of: &be) { out.append($0.bindMemory(to: UInt8.self).baseAddress!, count: 4) }
+            withUnsafeBytes(of: &be) { out.append(contentsOf: $0) }
             // apply masking to payload copy
             var copy = payload
             unmask(&copy, key: maskingKey)
@@ -663,76 +877,187 @@ public final class WebSocketConnection: @unchecked Sendable {
         } else {
             out.append(payload)
         }
-        
+
         return out
     }
-    
-    // Reads a single raw frame (may be a fragment)
-    private func readFrame() throws -> WebSocketFrame {
+
+    /// Reads `count` (2, 4 or 8) bytes as a big-endian unsigned integer.
+    private func readBigEndian(_ count: Int) throws -> UInt64 {
+        let bytes = try readExact(count)
+        return bytes.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+    }
+
+    /// Fails the connection (RFC 6455 section 7.1.7): sends a best-effort Close frame with
+    /// `code`, stops writing, shuts the socket down and returns the error to throw.
+    /// It never waits on a peer that is not reading, and the descriptor is left for the
+    /// owner's `closeSocket()`.
+    private func failConnection(_ code: UInt16, _ reason: String) -> WebSocketProtocolError {
+        partialOpcode = nil
+        partialPayload = Data()
+        // Wait briefly for a frame being written by another thread, so the Close frame is
+        // not spliced into it. If that writer is stuck, skip the Close frame.
+        if writeLock.lock(before: Date(timeIntervalSinceNow: 1)) {
+            let mayWrite: Bool = locked {
+                let ok = !closedForWriting && !closeFrameSent
+                closedForWriting = true
+                closeFrameSent = true
+                return ok
+            }
+            if mayWrite {
+                let payload = WebSocketWire.closePayload(code: code, reason: reason)
+                let bytes = serialize(frame: WebSocketFrame(fin: true, opcode: .close, payload: payload))
+                try? writeAll(bytes, nonBlocking: true)
+            }
+            writeLock.unlock()
+        }
+        shutdownSocket()
+        return WebSocketProtocolError(closeCode: code, reason: reason)
+    }
+
+    /// Reads one frame, validating the header and limits before the payload is read.
+    /// Returns a complete data message, or a control frame. Control frames may arrive
+    /// between the fragments of a message; the partial message is kept for the next call.
+    private func readFrameOrMessage() throws -> WebSocketFrame? {
         let header = try readExact(2)
         let b0 = header[header.startIndex]
-        let b1 = header[header.startIndex.advanced(by: 1)]
+        let b1 = header[header.startIndex + 1]
         let fin = (b0 & 0x80) != 0
-        let opcodeRaw = b0 & 0x0F
-        guard let opcode = WebSocketOpcode(rawValue: opcodeRaw) else { throw Err.parse("ws opcode") }
-        let masked = (b1 & 0x80) != 0
-        var length = Int(b1 & 0x7F)
-        if length == 126 {
-            let ext = try readExact(2)
-            let val = ext.withUnsafeBytes { $0.load(as: UInt16.self) }
-            length = Int(UInt16(bigEndian: val))
-        } else if length == 127 {
-            let ext = try readExact(8)
-            let val = ext.withUnsafeBytes { $0.load(as: UInt64.self) }
-            let be = UInt64(bigEndian: val)
-            // clamp to Int
-            if be > UInt64(Int.max) { throw Err.tooLarge }
-            length = Int(be)
+
+        // RSV1-3 have meaning only with a negotiated extension, and none is ever negotiated.
+        guard (b0 & 0x70) == 0 else {
+            throw failConnection(WebSocketCloseCode.protocolError, "reserved bits set without a negotiated extension")
         }
-        var maskingKey: UInt32? = nil
-        if masked {
-            let keyData = try readExact(4)
-            let k = keyData.withUnsafeBytes { $0.load(as: UInt32.self) }
-            maskingKey = UInt32(bigEndian: k)
+        guard let opcode = WebSocketOpcode(rawValue: b0 & 0x0F) else {
+            throw failConnection(WebSocketCloseCode.protocolError, "unknown opcode \(b0 & 0x0F)")
         }
-        var payload = length > 0 ? try readExact(length) : Data()
-        if let key = maskingKey {
-            unmask(&payload, key: key)
+        // Section 5.1: a server must close the connection on an unmasked client frame.
+        guard (b1 & 0x80) != 0 else {
+            throw failConnection(WebSocketCloseCode.protocolError, "client frames must be masked")
         }
-        return WebSocketFrame(fin: fin, opcode: opcode, payload: payload, maskingKey: maskingKey)
-    }
-    
-    // Reads a complete message (handles fragmentation for text/binary)
-    public func readMessage() throws -> WebSocketFrame {
-        var first = try readFrame()
-        switch first.opcode {
-            case .text, .binary:
-                if first.fin { return first }
-                // accumulate continuation frames
-                var data = first.payload
-                while true {
-                    let cont = try readFrame()
-                    guard cont.opcode == .continuation else { throw Err.parse("ws continuation expected") }
-                    data.append(cont.payload)
-                    if cont.fin { break }
+        let shortLength = UInt64(b1 & 0x7F)
+        if opcode.isControl {
+            // Section 5.5: control frames are never fragmented and carry at most 125 bytes.
+            guard fin else {
+                throw failConnection(WebSocketCloseCode.protocolError, "fragmented control frame")
+            }
+            guard shortLength <= 125 else {
+                throw failConnection(WebSocketCloseCode.protocolError, "control frame payload over 125 bytes")
+            }
+        } else if opcode == .continuation {
+            guard partialOpcode != nil else {
+                throw failConnection(WebSocketCloseCode.protocolError, "continuation frame with no message in progress")
+            }
+        } else {
+            guard partialOpcode == nil else {
+                throw failConnection(WebSocketCloseCode.protocolError, "new data frame while a fragmented message is in progress")
+            }
+        }
+
+        var length = shortLength
+        if shortLength == 126 {
+            length = try readBigEndian(2)
+        } else if shortLength == 127 {
+            length = try readBigEndian(8)
+            // Section 5.2: the most significant bit of a 64-bit length must be 0.
+            guard (length & (1 << 63)) == 0 else {
+                throw failConnection(WebSocketCloseCode.protocolError, "64-bit payload length with the most significant bit set")
+            }
+        }
+
+        if !opcode.isControl {
+            let (frameMax, messageMax) = locked { (frameLimit, messageLimit) }
+            guard length <= UInt64(frameMax) else {
+                throw failConnection(WebSocketCloseCode.messageTooBig, "frame larger than \(frameMax) bytes")
+            }
+            // Both terms are below 2^63, so the sum cannot overflow.
+            let soFar = opcode == .continuation ? UInt64(partialPayload.count) : 0
+            guard soFar + length <= UInt64(messageMax) else {
+                throw failConnection(WebSocketCloseCode.messageTooBig, "message larger than \(messageMax) bytes")
+            }
+        }
+
+        let maskingKey = try UInt32(truncatingIfNeeded: readBigEndian(4))
+        // `length` is now at most 125 (control) or within the configured limits.
+        var payload = try readExact(Int(length))
+        unmask(&payload, key: maskingKey)
+
+        switch opcode {
+            case .ping, .pong:
+                return WebSocketFrame(fin: true, opcode: opcode, payload: payload, maskingKey: maskingKey)
+            case .close:
+                switch WebSocketWire.parseClosePayload(payload) {
+                    case .failure(let error):
+                        throw failConnection(error.closeCode, error.reason)
+                    case .success(let parsed):
+                        locked {
+                            peerCloseCode = parsed.code
+                            peerCloseReason = parsed.reason
+                        }
                 }
-                return WebSocketFrame(fin: true, opcode: first.opcode, payload: data, maskingKey: nil)
+                // Any partial message is abandoned: the peer is closing.
+                partialOpcode = nil
+                partialPayload = Data()
+                return WebSocketFrame(fin: true, opcode: .close, payload: payload, maskingKey: maskingKey)
+            case .text, .binary:
+                if fin {
+                    try validateMessage(opcode: opcode, payload: payload)
+                    return WebSocketFrame(fin: true, opcode: opcode, payload: payload, maskingKey: maskingKey)
+                }
+                partialOpcode = opcode
+                partialPayload = payload
+                return nil
             case .continuation:
-                throw Err.parse("unexpected continuation start")
-            case .ping, .pong, .close:
-                return first
+                partialPayload.append(payload)
+                guard fin, let messageOpcode = partialOpcode else { return nil }
+                let message = partialPayload
+                partialOpcode = nil
+                partialPayload = Data()
+                try validateMessage(opcode: messageOpcode, payload: message)
+                return WebSocketFrame(fin: true, opcode: messageOpcode, payload: message, maskingKey: nil)
         }
     }
-    
+
+    /// Section 8.1: a text message must be valid UTF-8.
+    private func validateMessage(opcode: WebSocketOpcode, payload: Data) throws {
+        if opcode == .text && !WebSocketWire.isValidUTF8(payload) {
+            throw failConnection(WebSocketCloseCode.invalidPayload, "text message is not valid UTF-8")
+        }
+    }
+
+    /// Reads the next complete message (fragments reassembled) or control frame.
+    ///
+    /// A ping, pong or close that arrives between the fragments of a message is returned
+    /// on its own; the partial message carries on with the next call. Throws
+    /// `WebSocketProtocolError` (after sending the matching Close frame) when the peer
+    /// breaks the protocol or exceeds `maxFrameBytes` / `maxMessageBytes`.
+    public func readMessage() throws -> WebSocketFrame {
+        while true {
+            if let frame = try readFrameOrMessage() {
+                return frame
+            }
+        }
+    }
+
     // MARK: - Public send helpers (servers do not mask)
+
+    /// Writes one frame; the caller holds `writeLock`.
+    private func writeFrameLocked(_ frame: WebSocketFrame) throws {
+        if isClosed { throw Err.closed }
+        // As a server, do not mask outgoing frames per RFC6455
+        try writeAll(serialize(frame: frame, mask: false))
+        if frame.opcode == .close {
+            // Section 5.5.1: nothing may be sent after a Close frame.
+            locked {
+                closeFrameSent = true
+                closedForWriting = true
+            }
+        }
+    }
 
     public func send(frame: WebSocketFrame) throws {
         writeLock.lock()
         defer { writeLock.unlock() }
-        if isClosed { throw Err.closed }
-        // As a server, do not mask outgoing frames per RFC6455
-        let data = serialize(frame: frame, mask: false)
-        try writeAll(data)
+        try writeFrameLocked(frame)
     }
 
     /// Non-throwing send that returns false on failure (useful from tick handlers)
@@ -770,31 +1095,26 @@ public final class WebSocketConnection: @unchecked Sendable {
         try send(frame: WebSocketFrame(fin: true, opcode: .pong, payload: payload))
     }
 
+    /// Sends a Close frame and stops further writes. Calling it again after the Close
+    /// frame has gone out does nothing. Throws `Err.closed` if the connection broke first.
     public func close(code: UInt16 = 1000, reason: String = "") throws {
-        var payload = Data()
-        var be = code.bigEndian
-        withUnsafeBytes(of: &be) { payload.append($0.bindMemory(to: UInt8.self).baseAddress!, count: 2) }
-        payload.append(reason.data(using: .utf8) ?? Data())
-        payload = payload.prefix(125)
-        try send(frame: WebSocketFrame(fin: true, opcode: .close, payload: payload))
-        markClosed()
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        if locked({ closeFrameSent }) { return }
+        let payload = WebSocketWire.closePayload(code: code, reason: reason)
+        try writeFrameLocked(WebSocketFrame(fin: true, opcode: .close, payload: payload))
     }
-    
+
     // MARK: - Run loop
-    
+
     public typealias FrameHandler = @Sendable (WebSocketFrame) -> [WebSocketFrame]?
-    
+
     // Runs a blocking loop reading frames and invoking the handler. Returns on close or error.
     public func run(handle: FrameHandler) throws {
         defer { markClosed() }
         loop: while true {
-            let frame: WebSocketFrame
-            do {
-                frame = try readMessage()
-            } catch {
-                // Connection broken during read — clean exit
-                throw error
-            }
+            // Errors (peer gone, protocol violation) end the loop and reach the caller.
+            let frame = try readMessage()
             switch frame.opcode {
                 case .ping:
                     // if handler returns nothing, auto-pong
@@ -961,6 +1281,19 @@ public final class HTTPServer: @unchecked Sendable {
         if listenFD >= 0 { close(listenFD); listenFD = -1 }
     }
     
+    /// The port the listening socket is bound to (useful with `Config.port = 0`), or nil when not listening.
+    internal var boundPort: UInt16? {
+        let fd = listenFD
+        guard fd >= 0 else { return nil }
+        var addr = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let rc = withUnsafeMutablePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) }
+        }
+        guard rc == 0 else { return nil }
+        return UInt16(bigEndian: addr.sin_port)
+    }
+    
     private func acceptLoop() {
         while listenFD >= 0 {
             var addr = sockaddr()
@@ -989,6 +1322,12 @@ public final class HTTPServer: @unchecked Sendable {
         
         do {
             let head = try readHead(fd: fd)
+            
+            // Reject "..", encoded separators, NUL etc. before any route sees the raw path
+            if case .failure = RequestPathValidator.validate(uri: head.uri) {
+                try writeResponse(fd: fd, resp: HttpResponse().status(.badRequest).content(.text).body("Bad request"))
+                return
+            }
             
             let hm = head.headerMap
             let connectionHeader = hm["connection"]?.lowercased() ?? ""
@@ -1027,35 +1366,38 @@ public final class HTTPServer: @unchecked Sendable {
             let body = try readBody(fd: fd, head: head)
             
             let req = HttpRequest(head: head, body: body, kind: reqKind)
-            var resp = handler(req)
-            // Ensure Content-Length, skip for 101 Switching Protocols
-            if resp.status.code != 101 {
-                if resp.headers.first(where: { $0.0.caseInsensitiveCompare("Content-Length") == .orderedSame }) == nil {
-                    resp.header("Content-Length", "\(resp.bodyBytes.count)")
-                }
-            }
-            // Default Connection: close, skip for 101 Switching Protocols
-            if resp.status.code != 101 {
-                if resp.headers.first(where: { $0.0.caseInsensitiveCompare("Connection") == .orderedSame }) == nil {
-                    resp.header("Connection", "close")
-                }
-            }
+            let resp = handler(req)
+            // Content-Length and the default "Connection: close" are added by writeResponse
             try writeResponse(fd: fd, resp: resp)
             
             if resp.status.code == 101 {
+                // The socket now belongs to the upgrade hook (e.g. the WebSocket loop).
                 shouldClose = false
+                resp.onUpgraded?()
                 return
             }
         } catch let e as Err {
             // best-effort 400/413/500 depending
             let resp: HttpResponse
             switch e {
+                case .closed:
+                    // the peer has gone, or a response was already partly written: nothing more to send
+                    return
                 case .tooLarge:
                     resp = HttpResponse().status(.payloadTooLarge).content(.text).body("Payload too large")
                 case .parse, .unsupported:
                     resp = HttpResponse().status(.badRequest).content(.text).body("Bad request")
                 default:
                     resp = HttpResponse().status(.internalError).content(.text).body("Internal error")
+            }
+            _ = try? writeResponse(fd: fd, resp: resp)
+        } catch let e as RequestHeadTooLarge {
+            let resp: HttpResponse
+            switch e {
+                case .requestLine:
+                    resp = HttpResponse().status(HttpStatus(414, "URI Too Long")).content(.text).body("URI too long")
+                case .headerFields:
+                    resp = HttpResponse().status(HttpStatus(431, "Request Header Fields Too Large")).content(.text).body("Request header fields too large")
             }
             _ = try? writeResponse(fd: fd, resp: resp)
         } catch {
@@ -1066,11 +1408,27 @@ public final class HTTPServer: @unchecked Sendable {
     
     // MARK: - Parsing
     
-    private func readLineCRLF(fd: Int32, limit: Int = 16 * 1024) throws -> String {
+    /// Thrown by `readLineCRLF` for a line that does not end within its limit.
+    struct LineTooLong: Error {}
+    
+    /// Thrown by `readHead`; answered 414 (request line) or 431 (header fields).
+    enum RequestHeadTooLarge: Error {
+        case requestLine
+        case headerFields
+    }
+    
+    /// Limits on the request head. A line may hold up to `maxHeadLineBytes` bytes before its CRLF,
+    /// the header section (all header lines) up to `maxHeaderSectionBytes`, and there may be at most
+    /// `maxHeaderCount` header lines.
+    static let maxHeadLineBytes = 16 * 1024
+    static let maxHeaderSectionBytes = 64 * 1024
+    static let maxHeaderCount = 128
+    
+    private func readLineCRLF(fd: Int32, limit: Int = HTTPServer.maxHeadLineBytes) throws -> String {
         var data = Data()
         var lastWasCR = false
         var buf = [UInt8](repeating: 0, count: 1)
-        while data.count < limit {
+        while true {
             let r = buf.withUnsafeMutableBytes { ptr in
                 read(fd, ptr.baseAddress, 1)
             }
@@ -1086,14 +1444,27 @@ public final class HTTPServer: @unchecked Sendable {
             }
             data.append(b)
             lastWasCR = (b == 0x0D) // \r
+            // A line that doesn't end within the limit is refused, never split: returning the first part
+            // would let the rest be parsed as a separate header line that a proxy in front never saw.
+            // (`limit` content bytes plus the CR of the CRLF are allowed.)
+            if data.count > limit + 1 || (data.count == limit + 1 && lastWasCR == false) {
+                throw LineTooLong()
+            }
         }
         guard let s = String(data: data, encoding: .utf8) else { throw Err.parse("line utf8") }
         return s
     }
     
-    private func readHead(fd: Int32) throws -> HttpRequestHead {
+    func readHead(fd: Int32) throws -> HttpRequestHead {
         // Request line
-        let requestLine = try readLineCRLF(fd: fd)
+        let requestLine: String
+        do {
+            requestLine = try readLineCRLF(fd: fd)
+        } catch is LineTooLong {
+            throw RequestHeadTooLarge.requestLine
+        }
+        // a bare CR or LF (or a NUL) left inside a line could be echoed into a response header
+        guard Self.hasNoLineBreakOrNUL(requestLine) else { throw Err.parse("control character in request line") }
         let parts = requestLine.split(separator: " ", omittingEmptySubsequences: true)
         guard parts.count >= 3 else { throw Err.parse("request line") }
         let method = HttpMethod(String(parts[0]))
@@ -1102,9 +1473,22 @@ public final class HTTPServer: @unchecked Sendable {
         
         // Headers
         var headers: [(String,String)] = []
+        var headerSectionBytes = 0
         while true {
-            let line = try readLineCRLF(fd: fd)
+            let line: String
+            do {
+                line = try readLineCRLF(fd: fd)
+            } catch is LineTooLong {
+                throw RequestHeadTooLarge.headerFields
+            }
             if line.isEmpty { break } // CRLF terminator reached
+            // bound the memory and time one client can spend on a request head
+            headerSectionBytes += line.utf8.count + 2
+            guard headerSectionBytes <= Self.maxHeaderSectionBytes,
+                  headers.count < Self.maxHeaderCount else {
+                throw RequestHeadTooLarge.headerFields
+            }
+            guard Self.hasNoLineBreakOrNUL(line) else { throw Err.parse("control character in header") }
             guard let idx = line.firstIndex(of: ":") else { throw Err.parse("header colon") }
             let key = String(line[..<idx]).trimmingCharacters(in: .whitespaces)
             let val = String(line[line.index(after: idx)...]).trimmingCharacters(in: .whitespaces)
@@ -1112,6 +1496,10 @@ public final class HTTPServer: @unchecked Sendable {
         }
         
         return HttpRequestHead(method: method, uri: uri, version: version, headers: headers)
+    }
+    
+    private static func hasNoLineBreakOrNUL(_ line: String) -> Bool {
+        return line.utf8.contains(where: { $0 == 0x0D || $0 == 0x0A || $0 == 0x00 }) == false
     }
     
     // MARK: - Body reader (FINISHED)
@@ -1179,7 +1567,11 @@ public final class HTTPServer: @unchecked Sendable {
             var buf = [UInt8](repeating: 0, count: bufCap)
 
             func readLine() throws -> String {
-                try readLineCRLF(fd: fd)
+                do {
+                    return try readLineCRLF(fd: fd)
+                } catch is LineTooLong {
+                    throw Err.parse("chunk line too long")
+                }
             }
 
             while true {
@@ -1266,79 +1658,180 @@ public final class HTTPServer: @unchecked Sendable {
         }
     }
     
-    private func writeResponse(fd: Int32, resp: HttpResponse) throws {
-        var head = "HTTP/1.1 \(resp.status.code) \(resp.status.reason)\r\n"
-        var headers = resp.headers
-        if headers.first(where: { $0.0.caseInsensitiveCompare("Date") == .orderedSame }) == nil {
+    /// What goes on the wire for a response: the final status line, headers and body source.
+    internal struct PreparedResponse {
+        enum Body: Equatable {
+            case none
+            case bytes(Data)
+            case file(URL, offset: Int, length: Int)
+        }
+        var status: HttpStatus
+        var headers: [(String, String)]
+        var body: Body
+    }
+    
+    /// Builds the final status, headers and body for `resp`. Content-Length is written here and
+    /// nowhere else.
+    ///
+    /// - Headers that cannot be written safely (name not an RFC 7230 token, value containing
+    ///   CR, LF or NUL) are skipped. HttpResponse already refuses them; this is defence in depth.
+    /// - Any Content-Length or Transfer-Encoding the app set is replaced by the real length.
+    /// - File bodies send the file's size. A byte range sends 206 (when the status was 200),
+    ///   Content-Range and the range length; a range that does not overlap the file sends
+    ///   416 with `Content-Range: bytes */<size>`. A missing, unreadable or non-regular file
+    ///   sends 404.
+    /// - 1xx, 204 and 304 responses carry no body and no Content-Length.
+    /// - `Connection: close` is added unless the app set Connection (not for 101), and
+    ///   Date and Server are added when missing.
+    internal static func prepare(_ resp: HttpResponse, now: Date = Date()) -> PreparedResponse {
+        func named(_ name: String) -> ((String, String)) -> Bool {
+            return { $0.0.caseInsensitiveCompare(name) == .orderedSame }
+        }
+        
+        let reason = String(String.UnicodeScalarView(resp.status.reason.unicodeScalars.filter { $0.value >= 0x20 && $0.value != 0x7F }))
+        var status = HttpStatus(resp.status.code, reason)
+        var headers = resp.headers.filter { HTTPHeaderValidation.isWritable(name: $0.0, value: $0.1) }
+        headers.removeAll(where: named("Content-Length"))
+        headers.removeAll(where: named("Transfer-Encoding"))
+        
+        var body: PreparedResponse.Body
+        if let url = resp.bodyFileUrl {
+            headers.removeAll(where: named("Content-Range"))
+            if let size = regularFileSize(url) {
+                // A file sent without a Content-Type would be MIME-sniffed by the browser, so an uploaded
+                // "image" holding HTML could run script on this origin. Type it from its extension and
+                // turn sniffing off. (HttpResponse.file(relativePath:under:) is stricter still and is the
+                // API to use for files users can upload.)
+                if headers.contains(where: named("Content-Type")) == false {
+                    headers.append(("Content-Type", SafeFileResolver.legacyContentType(forExtension: url.pathExtension)))
+                }
+                if headers.contains(where: named("X-Content-Type-Options")) == false {
+                    headers.append(("X-Content-Type-Options", "nosniff"))
+                }
+                if let range = resp.bodyFileHandleRange {
+                    let lower = range.lowerBound
+                    let upper = min(range.upperBound, size)
+                    if lower < 0 || lower >= size || upper <= lower {
+                        status = HttpStatus(416, "Range Not Satisfiable")
+                        headers.append(("Content-Range", "bytes */\(size)"))
+                        body = .none
+                    } else {
+                        if status.code == 200 {
+                            status = HttpStatus(206, "Partial Content")
+                        }
+                        headers.append(("Content-Range", "bytes \(lower)-\(upper - 1)/\(size)"))
+                        body = .file(url, offset: lower, length: upper - lower)
+                    }
+                } else {
+                    body = .file(url, offset: 0, length: size)
+                }
+            } else {
+                status = .notFound
+                headers.removeAll(where: named("Content-Type"))
+                headers.append(("Content-Type", "text/plain; charset=utf-8"))
+                body = .bytes(Data("Not Found".utf8))
+            }
+        } else {
+            body = .bytes(resp.bodyBytes)
+        }
+        
+        let code = status.code
+        if (100..<200).contains(code) || code == 204 || code == 304 {
+            body = .none
+        } else {
+            switch body {
+                case .none:
+                    headers.append(("Content-Length", "0"))
+                case .bytes(let data):
+                    headers.append(("Content-Length", "\(data.count)"))
+                case .file(_, _, let length):
+                    headers.append(("Content-Length", "\(length)"))
+            }
+        }
+        
+        if code != 101 && headers.contains(where: named("Connection")) == false {
+            headers.append(("Connection", "close"))
+        }
+        if headers.contains(where: named("Date")) == false {
             let fmt = DateFormatter()
             fmt.locale = Locale(identifier: "en_US_POSIX")
             fmt.timeZone = TimeZone(secondsFromGMT: 0)
             fmt.dateFormat = "E, dd MMM yyyy HH:mm:ss 'GMT'"
-            headers.append(("Date", fmt.string(from: Date())))
+            headers.append(("Date", fmt.string(from: now)))
         }
-        if headers.first(where: { $0.0.caseInsensitiveCompare("Server") == .orderedSame }) == nil {
+        if headers.contains(where: named("Server")) == false {
             headers.append(("Server", "MicroHTTP/1.0"))
         }
-        // check to see if there is a content range specified for file responses
-        if let url = resp.bodyFileUrl, let range = resp.bodyFileHandleRange {
-            let fileSize: Int
-            do {
-                let attr = try FileManager.default.attributesOfItem(atPath: url.path)
-                fileSize = attr[.size] as? Int ?? 0
-            } catch {
-                fileSize = 0
-            }
-            headers.append(("Content-Range", "bytes \(range.lowerBound)-\(range.upperBound - 1)/\(fileSize)"))
-            headers.append(("Content-Length", "\(range.count)"))
+        return PreparedResponse(status: status, headers: headers, body: body)
+    }
+    
+    /// The size of a readable regular file, or nil.
+    ///
+    /// Symlinks are followed, as FileHandle(forReadingFrom:) follows them when the body is
+    /// sent: a link to a regular file is served with the target's size, and a dangling link
+    /// (or one to a directory, FIFO or device) is nil. attributesOfItem(atPath:) alone does
+    /// not follow a link in the last path component, so the path is resolved first.
+    private static func regularFileSize(_ url: URL) -> Int? {
+        guard url.isFileURL,
+              let resolved = SafeFileResolver.realPath(url.path),
+              let attributes = try? FileManager.default.attributesOfItem(atPath: resolved),
+              (attributes[.type] as? FileAttributeType) == .typeRegular,
+              let size = (attributes[.size] as? NSNumber)?.intValue,
+              FileManager.default.isReadableFile(atPath: resolved) else {
+            return nil
         }
-        for (k,v) in headers {
+        return size
+    }
+    
+    private func writeResponse(fd: Int32, resp: HttpResponse) throws {
+        var prepared = Self.prepare(resp)
+        
+        // open the file before anything is written, so a failure can still be answered cleanly
+        var fileHandle: FileHandle? = nil
+        if case .file(let url, let offset, _) = prepared.body {
+            do {
+                let handle = try FileHandle(forReadingFrom: url)
+                try handle.seek(toOffset: UInt64(offset))
+                fileHandle = handle
+            } catch {
+                prepared = Self.prepare(HttpResponse().status(.notFound).content(.text).body("Not Found"))
+            }
+        }
+        defer { try? fileHandle?.close() }
+        
+        var head = "HTTP/1.1 \(prepared.status.code) \(prepared.status.reason)\r\n"
+        for (k, v) in prepared.headers {
             head += "\(k): \(v)\r\n"
         }
         head += "\r\n"
         try writeAll(fd: fd, Data(head.utf8))
-        if resp.status.code != 204 && resp.status.code != 304 && resp.status.code != 101 {
-            if let url = resp.bodyFileUrl {
-                if let range = resp.bodyFileHandleRange {
-                    let handle = try FileHandle(forReadingFrom: url)
-                    try handle.seek(toOffset: UInt64(range.lowerBound))
-                    var remaining = range.count
-                    let bufSize = min(64 * 1024, max(8 * 1024, remaining))
-                    var buf = [UInt8](repeating: 0, count: bufSize)
-                    while remaining > 0 {
-                        let toRead = min(buf.count, remaining)
-                        let r = buf.withUnsafeMutableBytes { p in
-                            read(handle.fileDescriptor, p.baseAddress, toRead)
-                        }
-                        if r == 0 { break } // EOF
-                        if r < 0 { throw Err.io(errnoString("read file")) }
-                        try buf.withUnsafeBytes { p in
-                            try writeAll(fd: fd, UnsafeRawBufferPointer(start: p.baseAddress, count: r))
-                        }
-                        remaining -= r
-                    }
-                } else {
-                    let handle = try FileHandle(forReadingFrom: url)
-                    let fileSize = try handle.seekToEnd()
-                    try handle.seek(toOffset: 0)
-                    var remaining = Int(fileSize)
-                    let bufSize = min(64 * 1024, max(8 * 1024, remaining))
-                    var buf = [UInt8](repeating: 0, count: bufSize)
-                    while remaining > 0 {
-                        let toRead = min(buf.count, remaining)
-                        let r = buf.withUnsafeMutableBytes { p in
-                            read(handle.fileDescriptor, p.baseAddress, toRead)
-                        }
-                        if r == 0 { break } // EOF
-                        if r < 0 { throw Err.io(errnoString("read file")) }
-                        try buf.withUnsafeBytes { p in
-                            try writeAll(fd: fd, UnsafeRawBufferPointer(start: p.baseAddress, count: r))
-                        }
-                        remaining -= r
-                    }
+        
+        switch prepared.body {
+            case .none:
+                return
+            case .bytes(let data):
+                if data.isEmpty == false {
+                    try writeAll(fd: fd, data)
                 }
-            } else {
-                try writeAll(fd: fd, resp.bodyBytes)
-            }
+            case .file(_, _, let length):
+                guard let handle = fileHandle else { return }
+                var remaining = length
+                let bufSize = min(64 * 1024, max(8 * 1024, remaining))
+                var buf = [UInt8](repeating: 0, count: bufSize)
+                while remaining > 0 {
+                    let toRead = min(buf.count, remaining)
+                    let r = buf.withUnsafeMutableBytes { p in
+                        read(handle.fileDescriptor, p.baseAddress, toRead)
+                    }
+                    if r < 0 && errno == EINTR { continue }
+                    // the head promised `length` bytes; if the file shrank or fails now the
+                    // response cannot be completed, so stop and let the connection close
+                    if r <= 0 { throw Err.closed }
+                    try buf.withUnsafeBytes { p in
+                        try writeAll(fd: fd, UnsafeRawBufferPointer(start: p.baseAddress, count: r))
+                    }
+                    remaining -= r
+                }
         }
     }
 }

@@ -114,7 +114,7 @@ public extension CoreWebEndpoint {
         off.addAttribute(.class(placement.rawValue))
         off.addAttribute(.pair("id", id))
         off.addAttribute(.pair("tabindex", "-1"))
-        off.addAttribute(.custom("aria-labelledby=\"\(id)Label\""))
+        off.addAttribute(.custom("aria-labelledby=\"\(WebEscape.attribute("\(id)Label"))\""))
         off.backdrop(backdrop)
         off.scrollable(scrollable)
         off.keyboard(keyboard)
@@ -210,10 +210,11 @@ public extension CoreWebEndpoint {
                               scrollable: scrollable,
                               keyboard: keyboard,
                               content)
+        let idJS = ScriptValue.string(id)
         
         panel.script("""
         (function() {
-            var el = document.getElementById('\(id)');
+            var el = document.getElementById(\(idJS));
             if (!el) { return; }
         
             function syncOffCanvas\(panel.builderId)(value, _meta) {
@@ -228,17 +229,17 @@ public extension CoreWebEndpoint {
         
             addCallback\(isPresented.builderId)(syncOffCanvas\(panel.builderId));
             el.addEventListener('shown.bs.offcanvas', function() {
-                updateWebVariable\(isPresented.builderId)(true, { source: 'shown.bs.offcanvas', origin: '\(id)' });
+                updateWebVariable\(isPresented.builderId)(true, { source: 'shown.bs.offcanvas', origin: \(idJS) });
             });
             el.addEventListener('hidden.bs.offcanvas', function() {
-                updateWebVariable\(isPresented.builderId)(false, { source: 'hidden.bs.offcanvas', origin: '\(id)' });
+                updateWebVariable\(isPresented.builderId)(false, { source: 'hidden.bs.offcanvas', origin: \(idJS) });
             });
         })();
         """)
         
         panel.addAttribute(.domLoadedScript("""
         (function() {
-            var el = document.getElementById('\(id)');
+            var el = document.getElementById(\(idJS));
             if (!el) { return; }
             if (\(isPresented.builderId) === true) {
                 bootstrap.Offcanvas.getOrCreateInstance(el).show();

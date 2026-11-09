@@ -110,13 +110,22 @@ public extension WebOptionElement {
 public extension CoreWebEndpoint {
 
     /// Bound <input> element
+    ///
+    /// A `.password` field is never pre-filled: neither the bound value nor a value submitted with a form that
+    /// failed `validateData(_:)` is written back into the page. Validation error messages are still shown.
     @discardableResult
     func TextField(binding: WebVariableElement,
                type: InputType = .text)
     -> WebInputElement {
         
-        // update with previous session data
-        updateWithEphermeralData(binding)
+        let isSecret = (type == .password)
+        
+        // update with previous session data (never the submitted value of a secret field)
+        updateWithEphermeralData(binding, restoreValue: !isSecret)
+        if isSecret {
+            // nor a value the app seeded the binding with
+            binding.redactInitialValue()
+        }
 
         let inp = WebInputElement()
         populateCreatedObject(inp)
@@ -130,13 +139,25 @@ public extension CoreWebEndpoint {
         let id = "\(inp.builderId)"
         inp.id(id)
         if let varName = binding.internalName { inp.name(varName) }
-        inp.value(binding.asString())
-        inp.addAttribute(.script("""
+        if isSecret {
+            // No value attribute, and ignore the page-load sync of the bound value; later client-side
+            // updates of the variable (e.g. clearing it) still apply.
+            inp.addAttribute(.script("""
+function updateVariable\(inp.builderId)(value, _meta) {
+    if (_meta && _meta.source === 'initial') { return; }
+    \(inp.builderId).value = value;
+}
+addCallback\(binding.builderId)(updateVariable\(inp.builderId));
+"""))
+        } else {
+            inp.value(binding.asString())
+            inp.addAttribute(.script("""
 function updateVariable\(inp.builderId)(value, _meta) {
     \(inp.builderId).value = value;
 }
 addCallback\(binding.builderId)(updateVariable\(inp.builderId));
 """))
+        }
         inp.addAttribute(.custom("oninput=\"updateWebVariable\(binding.builderId)(this.value, { source: 'input', origin: '\(inp.builderId)' });\""))
         inp.addAttribute(.custom("onchange=\"updateWebVariable\(binding.builderId)(this.value, { source: 'change', origin: '\(inp.builderId)' });\""))
         return inp
@@ -161,11 +182,7 @@ addCallback\(binding.builderId)(updateVariable\(inp.builderId));
         ta.class("wsui-textarea")
         // Populate visible textarea content from the bound value so submitted
         // form data reflects the current binding even before any client callback.
-        let escapedText = value.asString()
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-        ta.innerHTML(escapedText)
+        ta.innerHTML(WebEscape.html(value.asString()))
         let id = "\(ta.builderId)"
         ta.id(id)
         ta.addAttribute(.script("""
@@ -193,7 +210,9 @@ addCallback\(value.builderId)(updateVariable\(ta.builderId));
         return field
     }
     
-    /// SwiftUI-style secure field convenience.
+    /// SwiftUI-style secure field convenience (`<input type="password">`).
+    ///
+    /// The field is never pre-filled with the bound value or with a previously submitted value.
     @discardableResult
     func SecureField(_ title: String,
                      text binding: WebVariableElement,

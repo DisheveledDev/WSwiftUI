@@ -8,32 +8,13 @@
 import Foundation
 
 internal extension String {
-    /// Escapes the string for safe HTML output.
+    /// Escapes the string for display inside `<pre><code>`, so it shows *literally* (a `<b>` in a code
+    /// sample is displayed as `<b>`, not rendered as bold).
     ///
-    /// This method replaces the following characters with their HTML entity equivalents:
-    /// - Parameter preserveLineBreaks: If `true`, converts newline characters (`\n`) into `<br>` tags.
-    /// - Returns: A new `String` with HTML entities escaped.
+    /// Only `&`, `<`, `>`, `"` and `'` are replaced with entities. Spaces, tabs and line breaks are left as they
+    /// are: `<pre>` preserves them, and keeping real spaces means copied code (e.g. a shell command) still works.
     func escapedForCode() -> String {
-
-        // 2) Fallback manual mapping if CFXML isn’t available
-        let escapeMap: [Character: String] = [
-            // Basic XML
-            "\t":  "&#9;",      // tab
-            " ":  "&nbsp;",    // non‑breaking space U+00A0
-        ]
-
-        var result = String()
-        result.reserveCapacity(self.count)
-
-        for c in self {
-            if let entity = escapeMap[c] {
-                result.append(entity)
-            } else {
-                result.append(c)
-            }
-        }
-
-        return result
+        return WebEscape.html(self)
     }
 }
 
@@ -63,8 +44,8 @@ public extension CoreWebEndpoint {
             result = create { element in
                 element.elementName  = "pre"
                 element.class("wsui-code")
-                // we need to ensure that the text output is safe for HTML, so we escape it
-                element.innerHTML("<code class = \"language-\(language.rawValue)\">\(text)</code>")
+                // the code is shown literally: escape it exactly once
+                element.innerHTML("<code class = \"language-\(language.rawValue)\">\(text.escapedForCode())</code>")
             }
         }
         

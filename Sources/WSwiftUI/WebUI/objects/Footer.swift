@@ -36,15 +36,16 @@ public extension WebFooterElement {
         // Ensure the footer has an ID for targeting
         let idName = "footer_\(builderId)"
         addAttribute(.pair("id", idName))
-        // Listen to scroll events to toggle the collapsedClass
+        // Listen to scroll events to toggle the collapsedClass (embedded as a script-safe string literal)
+        let classLiteral = WebJSON.scriptString(collapsedClass)
         addAttribute(.script("""
 window.addEventListener('scroll', function() {
   var el = document.getElementById('\(idName)');
   if (!el) return;
   if (window.scrollY > \(threshold)) {
-    el.classList.add('\(collapsedClass)');
+    el.classList.add(\(classLiteral));
   } else {
-    el.classList.remove('\(collapsedClass)');
+    el.classList.remove(\(classLiteral));
   }
 });
 """))

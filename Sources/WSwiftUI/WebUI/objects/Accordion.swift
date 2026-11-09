@@ -115,7 +115,7 @@ public extension CoreWebEndpoint {
             el.addAttribute(.custom("data-bs-target=\"#\(itemId)\""))
             el.addAttribute(.pair("aria-expanded", "false"))
             el.addAttribute(.pair("aria-controls", itemId))
-            el.innerHTML(title)
+            el.innerHTML(WebEscape.html(title))
         }
         stack.removeAll(where: { $0.builderId == h2.builderId })
 

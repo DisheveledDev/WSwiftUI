@@ -263,10 +263,11 @@ public extension CoreWebEndpoint {
                staticBackdrop: Bool = false,
                _ content: WebComposerClosure) -> WebModalElement {
         let modal = Modal(id: id, fade: fade, staticBackdrop: staticBackdrop, content)
+        let idJS = ScriptValue.string(id)
         
         modal.script("""
         (function() {
-            var el = document.getElementById('\(id)');
+            var el = document.getElementById(\(idJS));
             if (!el) { return; }
         
             function syncModal\(modal.builderId)(value, _meta) {
@@ -281,17 +282,17 @@ public extension CoreWebEndpoint {
         
             addCallback\(isPresented.builderId)(syncModal\(modal.builderId));
             el.addEventListener('shown.bs.modal', function() {
-                updateWebVariable\(isPresented.builderId)(true, { source: 'shown.bs.modal', origin: '\(id)' });
+                updateWebVariable\(isPresented.builderId)(true, { source: 'shown.bs.modal', origin: \(idJS) });
             });
             el.addEventListener('hidden.bs.modal', function() {
-                updateWebVariable\(isPresented.builderId)(false, { source: 'hidden.bs.modal', origin: '\(id)' });
+                updateWebVariable\(isPresented.builderId)(false, { source: 'hidden.bs.modal', origin: \(idJS) });
             });
         })();
         """)
         
         modal.addAttribute(.domLoadedScript("""
         (function() {
-            var el = document.getElementById('\(id)');
+            var el = document.getElementById(\(idJS));
             if (!el) { return; }
             if (\(isPresented.builderId) === true) {
                 bootstrap.Modal.getOrCreateInstance(el).show();

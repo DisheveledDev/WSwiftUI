@@ -214,6 +214,9 @@ public class WebElement {
         return self
     }
     
+    /// Sets the element's inner HTML. The string is emitted **raw** (it is trusted HTML), so never pass
+    /// user-supplied or database values here without escaping them first (`WebEscape.html(_:)`); the
+    /// built-in controls (`Text`, `Button`, `Link`, ...) already escape the text they are given.
     @discardableResult
     public func innerHTML(_ value: String)  -> Self {
         addAttribute(.innerHTML(value))
@@ -306,6 +309,8 @@ public class WebElement {
         return self
     }
     
+    /// Appends a raw attribute string (e.g. `custom("loading=\"lazy\"")`) to the tag **unescaped**. Use
+    /// `addAttribute(.pair(name, value))` for anything containing a dynamic value; `.pair` values are escaped.
     @discardableResult
     public func custom(_ custom: String)  -> Self {
         addAttribute(.custom(custom))
@@ -554,10 +559,21 @@ internal extension [WebElement] {
 }
 
 internal extension CoreWebEndpoint {
-    func updateWithEphermeralData(_ value: WebVariableElement) {
+    /// Re-applies the state recorded by `validateData(_:)` (`previous_<name>` / `error_<name>`) to a bound variable
+    /// when a form is re-rendered.
+    ///
+    /// - Parameter restoreValue: pass `false` for secret inputs (password fields). The submitted value is then
+    ///   never copied back into the variable (so it can't be echoed into the page), and it is dropped from
+    ///   `ephemeralData` so a later control bound to the same name can't restore it either. Error messages are
+    ///   still applied.
+    func updateWithEphermeralData(_ value: WebVariableElement, restoreValue: Bool = true) {
         
         guard let name = value.internalName else {
             return
+        }
+        
+        if restoreValue == false {
+            ephemeralData.removeValue(forKey: "previous_\(name)")
         }
         
         func anyFromJSONValue(_ json: JSONValue) -> Any {
@@ -617,7 +633,7 @@ internal extension CoreWebEndpoint {
                 let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
                 if trimmed.isEmpty { return [] }
                 if let data = trimmed.data(using: .utf8),
-                   let arr = try? JSONSerialization.jsonObject(with: data) as? [Any] {
+                   let arr = try? JSONBodyLimits.jsonObject(with: data) as? [Any] {
                     return arr.map { String(describing: $0) }
                 }
                 return trimmed.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -631,7 +647,7 @@ internal extension CoreWebEndpoint {
             }
             if let s = raw as? String,
                let data = s.data(using: .utf8),
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let obj = try? JSONBodyLimits.jsonObject(with: data) as? [String: Any],
                JSONSerialization.isValidJSONObject(obj) {
                 return obj
             }
@@ -725,12 +741,15 @@ open class CoreWebEndpoint {
     public var ephemeralData: [String : Any?] = [:]
     public var authenticationIdentifier: String? = nil
     internal var newAuthenticationIdentifier: String? = nil
+    /// Where `authenticationIdentifier` came from; set by WSwiftServer for each request.
+    internal var authenticationTokenSource: AuthenticationTokenSource = .none
     internal var sessionExpiry: Date? = nil
     internal var headAttributes: [WebCoreHeadElement] = []
     
+    /// A 302 redirect to `path`, carrying the session cookie under the same rules as page
+    /// responses (see `SessionCookie.value(newIdentifier:currentIdentifier:source:)`).
     public func redirect(_ path: String) -> HttpResponse {
-        let https = request.head.headerMap["origin"]?.contains("https") ?? false
-        return HttpResponse().redirect(to: path).setCookie(name: "auth", value: newAuthenticationIdentifier ?? authenticationIdentifier ?? "", path: "/", domain: nil, maxAge: 3600, expires: nil, httpOnly: true, secure: false, sameSite: "Lax")
+        return SessionCookie.apply(to: HttpResponse().redirect(to: path), for: self)
     }
     
     public func authenticateSession(token: String, expiry: Date? = nil) {
@@ -794,6 +813,15 @@ open class CoreWebsocketEndpoint: CoreWebEndpoint, @unchecked Sendable {
     // Tick interval for onTick callbacks (seconds). Set to <= 0 to disable ticking.
     open var tickInterval: TimeInterval = 1.0
 
+    /// Largest WebSocket frame payload a client may send, in bytes (default 1 MiB).
+    /// Larger frames are refused with close code 1009. Override, or set in `init()`,
+    /// to change it for this endpoint; `onOpen` can also adjust `connection.maxFrameBytes`.
+    open var maxFrameBytes: Int = WebSocketConnection.defaultMaxFrameBytes
+
+    /// Largest message a client may send after fragments are joined, in bytes (default 1 MiB).
+    /// Larger messages are refused with close code 1009.
+    open var maxMessageBytes: Int = WebSocketConnection.defaultMaxMessageBytes
+
     // Auth requirements default: unauthenticated
     open var authenticationRequired: [WebAuthenticationStatus] { get { [.unauthenticated] } set { /* ignored in base */ } }
 
@@ -814,9 +842,16 @@ open class CoreWebsocketEndpoint: CoreWebEndpoint, @unchecked Sendable {
 
     private var tickTimer: DispatchSourceTimer?
 
-    // Starts the WebSocket connection loop. Caller owns the fd lifecycle.
+    /// Starts the WebSocket loop on `upgrade.socketFD` and takes ownership of the descriptor:
+    /// when the loop ends it releases the descriptor through `WebSocketConnection.closeSocket()`.
+    ///
+    /// Call this only after the HTTP 101 response has been completely written, and do not
+    /// touch the descriptor afterwards. Otherwise the loop can close the descriptor while the
+    /// HTTP side still writes to or closes it, and the number can be reused by another client.
     public func startWebSocket(_ upgrade: WebSocketUpgrade) {
-        let conn = WebSocketConnection(fd: upgrade.socketFD)
+        let conn = WebSocketConnection(fd: upgrade.socketFD,
+                                       maxFrameBytes: self.maxFrameBytes,
+                                       maxMessageBytes: self.maxMessageBytes)
         conn.endpoint = self
         self.request = HttpRequest(head: self.request.head, body: self.request.body) // keep initial request context
         self.onOpen(connection: conn, request: self.request)
@@ -843,6 +878,8 @@ open class CoreWebsocketEndpoint: CoreWebEndpoint, @unchecked Sendable {
                 conn.closeSocket()
                 return
             }
+            // closeSocket() is idempotent and waits for in-flight I/O, so an endpoint that
+            // closes the socket itself in onTick/onFrame cannot cause a second close().
             defer {
                 self.tickTimer?.cancel()
                 self.tickTimer = nil
@@ -853,7 +890,11 @@ open class CoreWebsocketEndpoint: CoreWebEndpoint, @unchecked Sendable {
                     guard let self = self else { return nil }
                     return self.onFrame(connection: conn, frame: frame)
                 }
-                self.onClose(connection: conn, code: nil, reason: nil)
+                // The peer's close code and reason, when it sent a Close frame.
+                self.onClose(connection: conn, code: conn.receivedCloseCode, reason: conn.receivedCloseReason)
+            } catch let violation as WebSocketProtocolError {
+                // The connection already sent this close code to the peer.
+                self.onClose(connection: conn, code: violation.closeCode, reason: violation.reason)
             } catch {
                 self.onClose(connection: conn, code: nil, reason: String(describing: error))
             }

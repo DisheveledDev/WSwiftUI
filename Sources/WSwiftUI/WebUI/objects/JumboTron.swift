@@ -67,7 +67,7 @@ public extension CoreWebEndpoint {
     populateCreatedObject(h1)
     h1.elementName = "h1"
     h1.addAttribute(.class("display-4"))
-    h1.innerHTML(text)
+    h1.innerHTML(WebEscape.html(text))
     return h1
   }
 
@@ -78,7 +78,7 @@ public extension CoreWebEndpoint {
     populateCreatedObject(p)
     p.elementName = "p"
     p.addAttribute(.class("lead"))
-    p.innerHTML(text)
+    p.innerHTML(WebEscape.html(text))
     return p
   }
 }

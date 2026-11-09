@@ -145,7 +145,8 @@ public extension CoreWebEndpoint {
                             case .validJSON:
                                 if let d = valueString.data(using: .utf8) {
                                     do {
-                                        _ = try JSONSerialization.jsonObject(with: d, options: [])
+                                        // depth-limited: a deeply nested value fails as invalid JSON instead of overflowing the stack
+                                        _ = try JSONBodyLimits.jsonObject(with: d)
                                     } catch {
                                         overallResult = false
                                         ephemeralData["error_\(name)"] = "Field must be valid JSON"

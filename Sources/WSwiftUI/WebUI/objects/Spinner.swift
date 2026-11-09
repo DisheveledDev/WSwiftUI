@@ -60,7 +60,7 @@ public extension CoreWebEndpoint {
         // create the span within
         _ = create { el in
             el.elementName = "span"
-            el.innerHTML("\(text ?? "Loading...")")
+            el.innerHTML(WebEscape.html(text ?? "Loading..."))
             el.class("visually-hidden")
         }
         
